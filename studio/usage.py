@@ -60,7 +60,17 @@ def brief() -> dict:
     with db.engine.connect() as c:
         today = c.execute(sa.select(sa.func.count(), sa.func.coalesce(sa.func.sum(_tokens()), 0)).where(
             u.user_id == uid, u.t >= midnight)).first()
-    out = {"ready": ai.ready(), "provider": ai.label(), "model": (ai.models() or [""])[0],
+    c_ok, fb = ai._slot_ready(ai.current()), ai.fallback()
+    if c_ok:
+        prov_lbl, mod_id = ai.label(), (ai.models() or [""])[0]
+        fb_lbl = fb["label"] if fb["ready"] else ""
+        fb_mod = (fb["models"] or [""])[0] if fb["ready"] else ""
+    elif fb["ready"]:
+        prov_lbl, mod_id, fb_lbl, fb_mod = fb["label"], fb["models"][0], "", ""
+    else:
+        prov_lbl, mod_id, fb_lbl, fb_mod = ai.label(), (ai.models() or [""])[0], "", ""
+    out = {"ready": ai.ready(), "provider": prov_lbl, "model": mod_id,
+           "fallback_provider": fb_lbl, "fallback_model": fb_mod,
            "today_calls": int(today[0]), "today_tokens": int(today[1]),
            "problem": ai.problem["text"] if ai.problem["text"] and now - ai.problem["at"] < 6 * 3600 else ""}
     _brief[uid] = (now, out)

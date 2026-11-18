@@ -44,6 +44,11 @@ def _file():
     return config.DATA_DIR / "ai.json"
 
 
+def _norm(p: str) -> str:
+    s = str(p or "").strip().lower()
+    return ALIASES.get(s, s)
+
+
 def _from_dashboard() -> dict:
     """What was saved from the dashboard, read again only when the file changes."""
     f = _file()
@@ -60,14 +65,113 @@ def _from_dashboard() -> dict:
     return _saved["data"]
 
 
+def _profiles(d: dict | None = None) -> dict:
+    """Saved per-service settings (models, base_url, key), migrated seamlessly from .env and single-service ai.json files."""
+    d = _from_dashboard() if d is None else d
+    out = {}
+    for env_p, env_ms, env_b, env_k in (
+        (_norm(config.AI_FALLBACK_PROVIDER), list(config.AI_FALLBACK_MODELS), config.AI_FALLBACK_BASE_URL, config.ai_fallback_key()),
+        (_norm(config.AI_PROVIDER), list(config.AI_MODELS), config.AI_BASE_URL, config.ai_key()),
+    ):
+        if env_p in PROVIDERS and (env_ms or env_b or env_k):
+            out[env_p] = {"models": env_ms, "base_url": env_b, "key": env_k}
+    raw = d.get("profiles")
+    if isinstance(raw, dict):
+        for pid, v in raw.items():
+            np = _norm(pid)
+            if np in PROVIDERS and isinstance(v, dict):
+                out[np] = {"models": [str(m).strip() for m in (v.get("models") or []) if str(m).strip()],
+                           "base_url": str(v.get("base_url") or "").rstrip("/"),
+                           "key": str(v.get("key") or "")}
+    fb = d.get("fallback")
+    if isinstance(fb, dict) and _norm(fb.get("provider")) in PROVIDERS:
+        fp = _norm(fb.get("provider"))
+        out[fp] = {"models": [str(m).strip() for m in (fb.get("models") or []) if str(m).strip()],
+                   "base_url": str(fb.get("base_url") or "").rstrip("/"),
+                   "key": str(fb.get("key") or "")}
+    lp = _norm(d.get("provider"))
+    if lp in PROVIDERS:
+        out[lp] = {"models": [str(m).strip() for m in (d.get("models") or []) if str(m).strip()],
+                   "base_url": str(d.get("base_url") or "").rstrip("/"),
+                   "key": str(d.get("key") or "")}
+    return out
+
+
+def _slot_ready(slot: dict) -> bool:
+    p = slot["provider"]
+    addr = slot["base_url"] or PROVIDERS.get(p, ("", ""))[1]
+    return bool(p in PROVIDERS and slot["models"] and addr and (slot["key"] or p in NO_KEY))
+
+
 def current() -> dict:
     """Provider, models, address and key: what the dashboard saved, or else what .env says."""
     d = _from_dashboard()
-    p = str(d.get("provider") or config.AI_PROVIDER or "").strip().lower()
-    return {"provider": ALIASES.get(p, p),
+    p = _norm(d.get("provider") or config.AI_PROVIDER)
+    return {"provider": p,
             "models": list(d["models"]) if d.get("provider") else list(config.AI_MODELS),
             "base_url": (str(d.get("base_url") or "") if d.get("provider") else config.AI_BASE_URL).rstrip("/"),
             "key": str(d["key"]) if d.get("provider") and "key" in d else config.ai_key()}
+
+
+def fallback() -> dict:
+    """Optional secondary service tried when every model on the primary service fails."""
+    d = _from_dashboard()
+    prim = current()["provider"]
+    if "fallback" in d:
+        fb = d.get("fallback") if isinstance(d.get("fallback"), dict) else {}
+        fp = _norm(fb.get("provider"))
+        ms = [str(m).strip() for m in (fb.get("models") or []) if str(m).strip()]
+        addr = str(fb.get("base_url") or "").rstrip("/")
+        k = str(fb.get("key") or "")
+    else:
+        fp = _norm(config.AI_FALLBACK_PROVIDER)
+        ms = list(config.AI_FALLBACK_MODELS)
+        addr = config.AI_FALLBACK_BASE_URL
+        k = config.ai_fallback_key()
+    if fp == prim:
+        fp = ""
+    slot = {"provider": fp, "models": ms if fp else [], "base_url": addr if fp else "", "key": k if fp else ""}
+    return {**slot, "ready": _slot_ready(slot), "label": PROVIDERS.get(fp, ("",))[0]}
+
+
+def targets() -> list[tuple[str, str]]:
+    """Ordered (provider_id, model_id) pairs to try: primary models first, then fallback models if ready."""
+    out = []
+    c = current()
+    if _slot_ready(c):
+        out.extend((c["provider"], m) for m in c["models"])
+    fb = fallback()
+    if fb["ready"] and fb["provider"] != c["provider"]:
+        out.extend((fb["provider"], m) for m in fb["models"])
+    return out
+
+
+def _cfg_for(provider_id: str | None = None) -> dict:
+    c = current()
+    if not provider_id or _norm(provider_id) == c["provider"]:
+        slot = c
+    else:
+        p = _norm(provider_id)
+        fb = fallback()
+        if p == fb["provider"]:
+            slot = fb
+        else:
+            prof = _profiles().get(p, {})
+            slot = {"provider": p, "models": list(prof.get("models") or []),
+                    "base_url": str(prof.get("base_url") or "").rstrip("/"), "key": str(prof.get("key") or "")}
+    p = slot["provider"]
+    return {**slot, "address": slot["base_url"] or PROVIDERS.get(p, ("", ""))[1],
+            "label": PROVIDERS.get(p, ("",))[0], "how": PROVIDERS[p][2]}
+
+
+def redact(text: str) -> str:
+    """Replace any known AI key (primary, fallback or saved in profiles) with <key>."""
+    s = str(text or "")
+    keys = {current()["key"], fallback()["key"], config.ai_key(), config.ai_fallback_key(),
+            *(v.get("key", "") for v in _profiles().values())}
+    for k in sorted((x for x in keys if x), key=len, reverse=True):
+        s = s.replace(k, "<key>")
+    return s
 
 
 def provider() -> str:
@@ -92,47 +196,113 @@ def base_url() -> str:
 
 
 def ready() -> bool:
-    c = current()
-    return bool(c["provider"] in PROVIDERS and c["models"] and base_url() and (c["key"] or c["provider"] in NO_KEY))
+    return bool(targets())
+
+
+def _hint(k: str) -> str:
+    return k[-4:] if len(k) >= 12 else ""
 
 
 def public() -> dict:
-    """What the settings page may see. The key itself never leaves the server: only whether there is one, and
+    """What the settings page may see. Keys never leave the server: only whether there is one, and
     its last four characters so the owner can tell which key it is."""
-    c = current()
+    c, fb, profs = current(), fallback(), _profiles()
+    saved_public = {pid: {"models": v["models"], "base_url": v["base_url"],
+                          "has_key": bool(v["key"]), "key_hint": _hint(v["key"])}
+                    for pid, v in profs.items()}
     return {"provider": c["provider"], "models": c["models"], "base_url": c["base_url"], "has_key": bool(c["key"]),
-            "key_hint": c["key"][-4:] if len(c["key"]) >= 12 else "", "ready": ready(), "label": label(),
+            "key_hint": _hint(c["key"]), "ready": ready(), "label": label(),
             "saved_here": bool(_from_dashboard().get("provider")),
+            "fallback": {"provider": fb["provider"], "models": fb["models"], "base_url": fb["base_url"],
+                         "has_key": bool(fb["key"]), "key_hint": _hint(fb["key"]), "ready": fb["ready"], "label": fb["label"]},
+            "saved_profiles": saved_public,
             "providers": [{"id": k, "label": v[0], "address": v[1], "needs_key": k not in NO_KEY, "key_url": v[3], "example": v[4]}
                           for k, v in PROVIDERS.items()]}
 
 
-def save(provider_id: str, model_ids, address: str = "", new_key=None) -> dict:
-    """Save the choice made in the dashboard. `new_key` None keeps the key that is already there (the page never
-    has it to send back); an empty string removes it."""
-    p = ALIASES.get(str(provider_id or "").strip().lower(), str(provider_id or "").strip().lower())
-    if p not in PROVIDERS:
-        raise ValueError("Choose one of the AI services in the list.")
+def _clean_models(model_ids, empty_msg: str) -> list[str]:
     if isinstance(model_ids, str):
         model_ids = model_ids.split(",")
     ms = [str(m).strip()[:120] for m in (model_ids or []) if str(m).strip()][:5]
     if not ms:
-        raise ValueError("Enter the model to use.")
+        raise ValueError(empty_msg)
     if any(not re.fullmatch(r"[\w.\-:/@]+", m) for m in ms):
         raise ValueError("A model id has letters, digits and . - : / only.")
+    return ms
+
+
+def _clean_address(p: str, address: str, label_prefix: str = "A") -> str:
     address = str(address or "").strip().rstrip("/")[:300]
     if address and not re.fullmatch(r"https?://[^\s]+", address):
         raise ValueError("The address has to start with http:// or https://")
     if p == "custom" and not address:
-        raise ValueError("A custom service needs its address, for example http://127.0.0.1:1234/v1")
+        raise ValueError(f"{label_prefix} custom service needs its address, for example http://127.0.0.1:1234/v1")
+    return address
+
+
+def save(provider_id: str, model_ids, address: str = "", new_key=None,
+         fallback_provider: str | None = None, fallback_models=None, fallback_address: str | None = None, fallback_key=None) -> dict:
+    """Save the choice made in the dashboard. `new_key` / `fallback_key` None keeps the key already stored for that
+    service (the page never has it to send back); an empty string removes it."""
+    p = _norm(provider_id)
+    if p not in PROVIDERS:
+        raise ValueError("Choose one of the AI services in the list.")
+    ms = _clean_models(model_ids, "Enter the model to use.")
+    address = _clean_address(p, address, "A")
+    raw = _from_dashboard()
+    profs = _profiles(raw)
     old = current()
-    k = old["key"] if new_key is None and old["provider"] == p else str(new_key or "").strip()[:400]
+    saved_p_key = profs.get(p, {}).get("key", "") or (old["key"] if old["provider"] == p else "")
+    k = saved_p_key if new_key is None else str(new_key or "").strip()[:400]
     if not k and p not in NO_KEY:
         raise ValueError("Paste the key for this service.")
+    if k and len(k) < 8:
+        raise ValueError("That key looks too short. Paste the full key from the service.")
+    profs[p] = {"models": ms, "base_url": address, "key": k}
+
+    write_fb = True
+    if fallback_provider is None:
+        if "fallback" in raw:
+            cur_fb = raw.get("fallback") if isinstance(raw.get("fallback"), dict) else {}
+            fb_data = dict(cur_fb) if cur_fb and _norm(cur_fb.get("provider")) != p else {}
+        elif _norm(config.AI_FALLBACK_PROVIDER) == p:
+            fb_data = {}
+        else:
+            write_fb, fb_data = False, {}
+    else:
+        fp = _norm(fallback_provider)
+        if fp in ("", "none"):
+            fb_data = {}
+        else:
+            if fp not in PROVIDERS:
+                raise ValueError("Choose one of the AI services in the list for the fallback.")
+            if fp == p:
+                raise ValueError("Choose a different service for the fallback, or add a second model above after a comma.")
+            saved_fb = profs.get(fp, {})
+            raw_fms = fallback_models
+            if raw_fms is None or (isinstance(raw_fms, str) and not raw_fms.strip()) or raw_fms == []:
+                raw_fms = saved_fb.get("models") or (old["models"] if old["provider"] == fp else []) or (
+                    config.AI_FALLBACK_MODELS if fp == _norm(config.AI_FALLBACK_PROVIDER) else [])
+            fms = _clean_models(raw_fms, "Enter the model to use for the fallback service.")
+            raw_faddr = saved_fb.get("base_url", "") if fallback_address is None else fallback_address
+            faddr = _clean_address(fp, raw_faddr, "A fallback")
+            saved_fb_key = saved_fb.get("key", "") or (old["key"] if old["provider"] == fp else "") or (
+                config.ai_fallback_key() if fp == _norm(config.AI_FALLBACK_PROVIDER) else "")
+            fk = saved_fb_key if fallback_key is None else str(fallback_key or "").strip()[:400]
+            if not fk and fp not in NO_KEY:
+                raise ValueError("Paste the key for the fallback service.")
+            if fk and len(fk) < 8:
+                raise ValueError("That fallback key looks too short. Paste the full key from the service.")
+            fb_data = {"provider": fp, "models": fms, "base_url": faddr, "key": fk}
+            profs[fp] = {"models": fms, "base_url": faddr, "key": fk}
+
+    payload = {"provider": p, "models": ms, "base_url": address, "key": k, "profiles": profs}
+    if write_fb:
+        payload["fallback"] = fb_data
     with _lock:
         f = _file()
         tmp = f.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"provider": p, "models": ms, "base_url": address, "key": k}), encoding="utf-8")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
         try:
             os.chmod(tmp, 0o600)        # the key is only for whoever runs the server
         except OSError:
@@ -144,12 +314,13 @@ def save(provider_id: str, model_ids, address: str = "", new_key=None) -> dict:
 
 def list_models(provider_id=None, address=None, with_key=None) -> list:
     """The model ids a service offers, so the settings page can show a list to pick from."""
-    c = current()
-    p = ALIASES.get(str(provider_id or c["provider"]).lower(), str(provider_id or c["provider"]).lower())
+    c, fb, profs = current(), fallback(), _profiles()
+    p = _norm(provider_id or c["provider"])
     if p not in PROVIDERS:
         raise ValueError("Choose one of the AI services in the list.")
-    k = str(with_key or "").strip() or (c["key"] if c["provider"] == p else "")
-    base = str(address or "").strip().rstrip("/") or (c["base_url"] if c["provider"] == p else "") or PROVIDERS[p][1]
+    saved = c if c["provider"] == p else fb if fb["provider"] == p else profs.get(p, {})
+    k = str(with_key or "").strip() or str(saved.get("key") or "")
+    base = str(address or "").strip().rstrip("/") or str(saved.get("base_url") or "") or PROVIDERS[p][1]
     if not base:
         raise ValueError("Enter the service's address first.")
     how = PROVIDERS[p][2]
@@ -160,7 +331,8 @@ def list_models(provider_id=None, address=None, with_key=None) -> list:
     else:
         r = httpx.get(f"{base}/models", headers={"Authorization": f"Bearer {k}"} if k else {}, timeout=20)
     if r.status_code != 200:
-        raise AIError(f"HTTP {r.status_code} {r.text[:200].replace(k or chr(0), '<key>')}")
+        bad = redact(r.text).replace(k or chr(0), "<key>")[:200]
+        raise AIError(f"HTTP {r.status_code} {bad}", provider_id=p)
     data = r.json()
     if how == "gemini":
         found = [m.get("name", "").split("/")[-1] for m in data.get("models", [])
@@ -172,38 +344,57 @@ def list_models(provider_id=None, address=None, with_key=None) -> list:
 
 def test() -> dict:
     """One tiny request with the settings in use, to prove the key, the address and the model all work."""
-    ms = models()
-    if not ready():
+    c, fb = current(), fallback()
+    c_ready = _slot_ready(c)
+    if not c_ready and not fb["ready"]:
         raise ValueError("Save a service, a model and a key first.")
-    out, sent, wrote = call(ms[0], 'Answer with a JSON array that holds the single string "ok".', {"type": "ARRAY", "items": {"type": "STRING"}})
-    return {"ok": True, "model": ms[0], "tokens": sent + wrote, "answer": str(out)[:80]}
+    schema = {"type": "ARRAY", "items": {"type": "STRING"}}
+    prompt = 'Answer with a JSON array that holds the single string "ok".'
+    active = c if c_ready else fb
+    out, sent, wrote = call(active["models"][0], prompt, schema, provider_id=active["provider"])
+    fb_ok, fb_model, fb_err = None, "", ""
+    if c_ready and fb["ready"]:
+        fb_model = fb["models"][0]
+        try:
+            call(fb_model, prompt, schema, provider_id=fb["provider"])
+            fb_ok = True
+        except Exception as e:  # noqa: BLE001
+            fb_ok = False
+            fb_err = explain(e, fb["provider"], fb_model) or redact(str(e))[:160]
+    return {"ok": True, "model": active["models"][0], "tokens": sent + wrote, "answer": str(out)[:80],
+            "fallback_ok": fb_ok, "fallback_model": fb_model, "fallback_error": fb_err}
 
 
 class AIError(RuntimeError):
-    pass
+    def __init__(self, msg: str, provider_id: str | None = None, model: str | None = None):
+        super().__init__(msg)
+        self.provider_id = provider_id
+        self.model = model
 
 
 problem = {"text": "", "at": 0.0}       # why the AI last failed, for the dashboard; cleared when it answers again
 
 
-def explain(e) -> str:
+def explain(e, provider_id: str | None = None, model: str | None = None) -> str:
     """What went wrong with an AI call, in words the owner can act on."""
-    text, low = str(e), str(e).lower()
-    name = (models() or ["?"])[0]
+    text, low = redact(e), redact(e).lower()
+    pid = _norm(provider_id or getattr(e, "provider_id", None) or provider())
+    svc = PROVIDERS.get(pid, (label() or "The AI service",))[0]
+    name = model or getattr(e, "model", None) or (models() or ["?"])[0]
     if "404" in text or "not found" in low or "does not exist" in low or "unknown model" in low or "not_found" in low:
-        return f"{label()} doesn't know the model \"{name}\". Open Settings, AI, press Find models and pick one from the list."
+        return f"{svc} doesn't know the model \"{name}\". Open Settings, AI, press Find models and pick one from the list."
     if "401" in text or "403" in text or "api key" in low or "api_key" in low or "unauthorized" in low or "permission" in low:
-        return f"{label()} refused the key. Paste a working key under Settings, AI."
+        return f"{svc} refused the key. Paste a working key under Settings, AI."
     if "429" in text or "quota" in low or "rate limit" in low or "exhausted" in low:
-        return f"{label()} says the key has hit its limit or has no credit left. Check the account with {label()}, or try again later."
+        return f"{svc} says the key has hit its limit or has no credit left. Check the account with {svc}, or try again later."
     if "connect" in low or "timed out" in low or "timeout" in low or "getaddrinfo" in low or "refused" in low or "nodename" in low or "servname" in low or "nameresolutionerror" in low or "name resolution" in low:
-        return f"PeakCut couldn't reach {label()}. Check the internet connection" + (" and that Ollama is running." if provider() == "ollama" else ".")
+        return f"PeakCut couldn't reach {svc}. Check the internet connection" + (" and that Ollama is running." if pid == "ollama" else ".")
     return ""
 
 
-def note_problem(e):
+def note_problem(e, provider_id: str | None = None, model: str | None = None):
     import time
-    why = explain(e)
+    why = explain(e, provider_id=provider_id, model=model)
     if why:
         problem.update(text=why, at=time.time())
 
@@ -212,9 +403,9 @@ def clear_problem():
     problem.update(text="", at=0.0)
 
 
-def _fail(r, model):
-    text = r.text[:300].replace(key() or "\0", "<key>")
-    raise AIError(f"HTTP {r.status_code} {text}")
+def _fail(r, model, provider_id: str | None = None):
+    text = redact(r.text)[:300]
+    raise AIError(f"HTTP {r.status_code} {text}", provider_id=provider_id, model=model)
 
 
 # ---------------------------------------------------------------- the schema, said in words for chat models
@@ -292,34 +483,25 @@ def _parse(text):
 
 
 # ---------------------------------------------------------------- one call
-def call(model: str, prompt: str, schema: dict, timeout: float | None = None):
+def call(model: str, prompt: str, schema: dict, timeout: float | None = None, provider_id: str | None = None):
     """Ask one model. Returns (the parsed JSON answer, tokens sent, tokens written back).
 
     `timeout` is how long one answer may take. A live stream passes a short one, because a slow
     answer must not stop the recording."""
-    how = PROVIDERS[provider()][2]
-    return {"gemini": _gemini, "openai": _openai, "anthropic": _anthropic}[how](model, prompt, schema, timeout)
+    cfg = _cfg_for(provider_id)
+    return {"gemini": _gemini, "openai": _openai, "anthropic": _anthropic}[cfg["how"]](model, prompt, schema, timeout, cfg)
 
 
-def see(prompt: str, image: bytes, timeout: float | None = None) -> tuple[str, int, int]:
-    """Ask one model about one picture: (the answer as text, tokens in, tokens out).
-
-    Nothing is broken by a service that cannot look at pictures, or a model that is only text: the answer
-    comes back empty, or says something the caller does not understand, and the caller carries on without
-    it. The picture is a JPEG, passed as base64 inside the ordinary message."""
-    if not ready() or not image or not models():
-        return "", 0, 0
-    model = models()[0]
-    b64 = base64.b64encode(image).decode()
-    how = PROVIDERS[provider()][2]
+def _see_one(cfg: dict, model: str, prompt: str, b64: str, timeout: float | None) -> tuple[str, int, int]:
+    how, addr, k, pid = cfg["how"], cfg["address"], cfg["key"], cfg["provider"]
     if how == "gemini":
         body = {"contents": [{"role": "user", "parts": [
             {"text": prompt},
             {"inline_data": {"mimeType": "image/jpeg", "data": b64}}]}]}
-        r = httpx.post(f"{base_url()}/{model}:generateContent", json=body,
-                       headers={"x-goog-api-key": key()}, timeout=timeout or 120)
+        r = httpx.post(f"{addr}/{model}:generateContent", json=body,
+                       headers={"x-goog-api-key": k}, timeout=timeout or 120)
         if r.status_code != 200:
-            _fail(r, model)
+            _fail(r, model, pid)
         data = r.json()
         text = "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"])
         u = data.get("usageMetadata", {})
@@ -329,33 +511,68 @@ def see(prompt: str, image: bytes, timeout: float | None = None) -> tuple[str, i
         body = {"model": model, "max_tokens": 300, "messages": [{"role": "user", "content": [
             {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
             {"type": "text", "text": prompt}]}]}
-        r = httpx.post(f"{base_url()}/messages", json=body, timeout=timeout or 120,
-                       headers={"x-api-key": key(), "anthropic-version": "2023-06-01"})
+        r = httpx.post(f"{addr}/messages", json=body, timeout=timeout or 120,
+                       headers={"x-api-key": k, "anthropic-version": "2023-06-01"})
         if r.status_code != 200:
-            _fail(r, model)
+            _fail(r, model, pid)
         data = r.json()
         text = "".join(p.get("text", "") for p in data.get("content") or [] if p.get("type") == "text")
         u = data.get("usage") or {}
         return text, int(u.get("input_tokens") or 0), int(u.get("output_tokens") or 0)
-    headers = {"Authorization": f"Bearer {key()}"} if key() else {}
+    headers = {"Authorization": f"Bearer {k}"} if k else {}
     body = {"model": model, "stream": False, "messages": [{"role": "user", "content": [
         {"type": "text", "text": prompt},
         {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64}}]}]}
-    r = httpx.post(f"{base_url()}/chat/completions", json=body, headers=headers, timeout=timeout or 120)
+    r = httpx.post(f"{addr}/chat/completions", json=body, headers=headers, timeout=timeout or 120)
     if r.status_code != 200:
-        _fail(r, model)
+        _fail(r, model, pid)
     data = _openai_body(r)
     text = (data["choices"][0]["message"].get("content") or "")
     u = data.get("usage") or {}
     return text, int(u.get("prompt_tokens") or 0), int(u.get("completion_tokens") or 0)
 
 
-def _gemini(model, prompt, schema, timeout=None):
+def see(prompt: str, image: bytes, timeout: float | None = None) -> tuple[str, int, int]:
+    """Ask one model about one picture: (the answer as text, tokens in, tokens out).
+
+    Nothing is broken by a service that cannot look at pictures, or a model that is only text: the answer
+    comes back empty, or says something the caller does not understand, and the caller carries on without
+    it. The picture is a JPEG, passed as base64 inside the ordinary message."""
+    import time
+    ts = targets()
+    if not ts or not image:
+        return "", 0, 0
+    b64 = base64.b64encode(image).decode()
+    deadline = (time.monotonic() + timeout) if timeout else None
+    bad_provs, last = set(), None
+    for i, (pid, model) in enumerate(ts):
+        if pid in bad_provs:
+            continue
+        if deadline is not None:
+            rem = deadline - time.monotonic()
+            if rem <= 0:
+                break
+            left = len(ts) - i
+            call_to = max(2.0, rem / min(left, 3)) if left > 1 else rem
+        else:
+            call_to = None
+        try:
+            return _see_one(_cfg_for(pid), model, prompt, b64, call_to)
+        except Exception as e:  # noqa: BLE001
+            last = e
+            s = str(e).lower()
+            if "http 401" in s or "http 403" in s or "connect" in s or "refused" in s or "nameresolution" in s:
+                bad_provs.add(pid)
+    raise last
+
+
+def _gemini(model, prompt, schema, timeout=None, cfg=None):
+    cfg = cfg or _cfg_for()
     body = {"contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "generationConfig": {"temperature": 0.4, "responseMimeType": "application/json", "responseSchema": schema}}
-    r = httpx.post(f"{base_url()}/{model}:generateContent", json=body, headers={"x-goog-api-key": key()}, timeout=timeout or 120)
+    r = httpx.post(f"{cfg['address']}/{model}:generateContent", json=body, headers={"x-goog-api-key": cfg["key"]}, timeout=timeout or 120)
     if r.status_code != 200:
-        _fail(r, model)
+        _fail(r, model, cfg["provider"])
     data = r.json()
     text = "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"])
     u = data.get("usageMetadata", {})
@@ -414,29 +631,31 @@ def _from_events(text: str) -> dict:
     return {"choices": [{"message": message}], "usage": usage}
 
 
-def _openai(model, prompt, schema, timeout=None):
-    headers = {"Authorization": f"Bearer {key()}"} if key() else {}
+def _openai(model, prompt, schema, timeout=None, cfg=None):
+    cfg = cfg or _cfg_for()
+    headers = {"Authorization": f"Bearer {cfg['key']}"} if cfg["key"] else {}
     body = {"model": model, "messages": [{"role": "user", "content": _wrapped(prompt, schema)}], "stream": False}
     # Most services accept these two extras; a few models refuse one of them, so they are dropped on a refusal.
     extras = [{"temperature": 0.4, "response_format": {"type": "json_object"}}, {"response_format": {"type": "json_object"}}, {}]
     r = None
     for extra in extras:
-        r = httpx.post(f"{base_url()}/chat/completions", json={**body, **extra}, headers=headers, timeout=timeout or 180)
+        r = httpx.post(f"{cfg['address']}/chat/completions", json={**body, **extra}, headers=headers, timeout=timeout or 180)
         if r.status_code not in (400, 422):
             break
     if r.status_code != 200:
-        _fail(r, model)
+        _fail(r, model, cfg["provider"])
     data = _openai_body(r)
     u = data.get("usage") or {}
     return _parse(data["choices"][0]["message"].get("content")), int(u.get("prompt_tokens") or 0), int(u.get("completion_tokens") or 0)
 
 
-def _anthropic(model, prompt, schema, timeout=None):
+def _anthropic(model, prompt, schema, timeout=None, cfg=None):
+    cfg = cfg or _cfg_for()
     body = {"model": model, "max_tokens": 8192, "messages": [{"role": "user", "content": _wrapped(prompt, schema)}]}
-    r = httpx.post(f"{base_url()}/messages", json=body, timeout=timeout or 180,
-                   headers={"x-api-key": key(), "anthropic-version": "2023-06-01"})
+    r = httpx.post(f"{cfg['address']}/messages", json=body, timeout=timeout or 180,
+                   headers={"x-api-key": cfg["key"], "anthropic-version": "2023-06-01"})
     if r.status_code != 200:
-        _fail(r, model)
+        _fail(r, model, cfg["provider"])
     data = r.json()
     text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
     u = data.get("usage") or {}

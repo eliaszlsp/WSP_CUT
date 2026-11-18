@@ -1063,9 +1063,10 @@ const jobOf = id => S.jobs.find(j => j.id === id);
 /* ============================================================ shell */
 function aiCard() {
   const k = S.status.ai; if (!k) return "";
+  const fb = k.ready && k.fallback_provider ? ` · Fallback: ${k.fallback_provider}` : "";
   return `<div class="card ai-home"><h2>AI</h2>
     <div class="ai-big">${k.ready ? esc(k.provider || "Ready") : "Not set up"}</div>
-    <p class="ai-sub">${k.ready ? esc(k.model || "") : "Clips are picked by loudness until an AI key is added."}</p>
+    <p class="ai-sub">${k.ready ? esc((k.model || "") + fb) : "Clips are picked by loudness until an AI key is added."}</p>
     <div class="ai-stats"><div><b>${(k.today_calls || 0).toLocaleString()}</b><span>AI calls today</span></div>
       <div><b>${fmtK(k.today_tokens)}</b><span>Tokens today</span></div></div>
     <div class="row">${!k.ready && S.status.user?.is_admin ? `<button class="btn primary" data-act="go" data-v="settings" data-tab="ai">${ic("plus")}Add AI key</button>` : ""}<button class="btn" data-act="go" data-v="usage">View usage ${ic("arrowr")}</button></div></div>`;
@@ -1955,7 +1956,7 @@ function drawOverview() {
 /* ============================================================ AI usage */
 async function loadUsage() {
   try { S.usage = await api("/api/usage"); } catch { return; }
-  S.status.ai = {...S.status.ai, ready: S.usage.ready, provider: S.usage.provider, model: S.usage.model, today_calls: S.usage.today_calls, today_tokens: S.usage.today_tokens};
+  S.status.ai = {...S.status.ai, ready: S.usage.ready, provider: S.usage.provider, model: S.usage.model, fallback_provider: S.usage.fallback_provider, fallback_model: S.usage.fallback_model, today_calls: S.usage.today_calls, today_tokens: S.usage.today_tokens};
   drawShell(); drawUsage();
 }
 function tokenChart(daily) {
@@ -1979,9 +1980,10 @@ function hbars(rows) {
 }
 function drawUsage() {
   const k = S.usage, box = $("#usage"); if (!k || !box) return;
+  const fb = k.ready && k.fallback_provider ? ` · Fallback: ${k.fallback_provider}` : "";
   box.innerHTML = `${k.ready ? "" : `<div class="note">${ic("warn")}<span>${S.status.user?.is_admin ? "No AI key is set, so clips are picked by loudness only. Add your key under Settings, AI." : "The AI isn't set up on this server yet, so clips are picked by loudness."}</span></div>`}
     <div class="tiles five" style="margin-top:${k.ready ? 0 : 16}px">
-      <div class="tile"><i>${ic("bolt")}</i><b>${k.ready ? esc(k.provider || "Ready") : "Not set up"}</b><span>${k.ready && k.model ? esc(k.model) : "AI service"}</span></div>
+      <div class="tile"><i>${ic("bolt")}</i><b>${k.ready ? esc(k.provider || "Ready") : "Not set up"}</b><span>${k.ready && k.model ? esc(k.model + fb) : "AI service"}</span></div>
       <div class="tile"><i>${ic("clock")}</i><b>${(k.today_calls || 0).toLocaleString()}</b><span>AI calls today</span></div>
       <div class="tile"><i>${ic("chart")}</i><b>${fmtK(k.today_tokens)}</b><span>Tokens today</span></div>
       <div class="tile"><i>${ic("scissors")}</i><b>${(k.calls_total || 0).toLocaleString()}</b><span>AI calls in total</span></div>
@@ -2005,14 +2007,45 @@ const setTabs = () => [
                                           ["security", "Security", "lock", "Password and signing out"]]),
   ["apps", "Connected apps", "plug", "Where your clips get posted"],
   ...(S.status.user?.is_admin ? [["storage", "Storage", "folder", "Where videos and clips are kept"]] : [])];
-function aiHints() {
+function aiHints(changed) {
   const k = S.ai, sel = $("#ai_provider"); if (!k || !sel) return;
-  const pv = k.providers.find(x => x.id === sel.value) || k.providers[0], same = pv.id === k.provider;
-  $("#ai_key").placeholder = same && k.has_key ? `Saved${k.key_hint ? ", ends in " + k.key_hint : ""}. Paste a new key to replace it` : pv.needs_key ? "Paste your key" : "Not needed";
+  const pv = k.providers.find(x => x.id === sel.value) || k.providers[0], prof = k.saved_profiles?.[pv.id];
+  if (changed === "main") {
+    $("#ai_models").innerHTML = "";
+    $("#ai_key").value = "";
+    const defMs = prof?.models?.length ? prof.models : (pv.id === k.provider ? k.models : []);
+    $("#ai_model").value = defMs?.length ? defMs.join(", ") : "";
+    $("#ai_base").value = prof?.base_url || (pv.id === k.provider ? k.base_url : "") || "";
+  }
+  const hasKey = (pv.id === k.provider && k.has_key) || !!prof?.has_key;
+  const hint = (pv.id === k.provider ? k.key_hint : "") || prof?.key_hint || "";
+  $("#ai_key").placeholder = hasKey ? `Saved${hint ? ", ends in " + hint : ""}. Paste a new key to replace it` : pv.needs_key ? "Paste your key" : "Not needed";
   $("#ai_keyhint").innerHTML = pv.key_url ? `${pv.needs_key ? "Get a key at" : "Set it up at"} <a href="${esc(pv.key_url)}" target="_blank" rel="noopener">${esc(pv.key_url.replace("https://", ""))}</a>. The key stays on this server and is never shown again.` : "The key stays on this server and is never shown again.";
   $("#ai_model").placeholder = pv.example ? "For example " + pv.example : "The model id, exactly as the service names it";
   $("#ai_base").placeholder = pv.address || "http://127.0.0.1:1234/v1";
-  $("#ai_basewrap").hidden = pv.id !== "custom" && !(same && k.base_url);
+  $("#ai_basewrap").hidden = pv.id !== "custom" && !$("#ai_base").value;
+
+  const fbSel = $("#ai_fb_provider"), fbWrap = $("#ai_fb_wrap");
+  if (!fbSel || !fbWrap) return;
+  [...fbSel.options].forEach(o => { if (o.value) o.disabled = o.value === pv.id; });
+  if (fbSel.value === pv.id) fbSel.value = "";
+  const fpv = k.providers.find(x => x.id === fbSel.value), fprof = fpv ? k.saved_profiles?.[fpv.id] : null;
+  if (changed === "fb") {
+    $("#ai_fb_models").innerHTML = "";
+    $("#ai_fb_key").value = "";
+    const defFbMs = fprof?.models?.length ? fprof.models : (fpv?.id === k.fallback?.provider ? k.fallback.models : []);
+    $("#ai_fb_model").value = defFbMs?.length ? defFbMs.join(", ") : "";
+    $("#ai_fb_base").value = fprof?.base_url || (fpv?.id === k.fallback?.provider ? k.fallback.base_url : "") || "";
+  }
+  fbWrap.hidden = !fpv;
+  if (!fpv) return;
+  const fHasKey = (fpv.id === k.fallback?.provider && k.fallback?.has_key) || !!fprof?.has_key;
+  const fHint = (fpv.id === k.fallback?.provider ? k.fallback?.key_hint : "") || fprof?.key_hint || "";
+  $("#ai_fb_key").placeholder = fHasKey ? `Saved${fHint ? ", ends in " + fHint : ""}. Paste a new key to replace it` : fpv.needs_key ? "Paste your key" : "Not needed";
+  $("#ai_fb_keyhint").innerHTML = fpv.key_url ? `${fpv.needs_key ? "Get a key at" : "Set it up at"} <a href="${esc(fpv.key_url)}" target="_blank" rel="noopener">${esc(fpv.key_url.replace("https://", ""))}</a>. Used automatically if the main service hits a limit or fails.` : "Used automatically if the main service hits a limit or fails.";
+  $("#ai_fb_model").placeholder = fpv.example ? "For example " + fpv.example : "The model id, exactly as the service names it";
+  $("#ai_fb_base").placeholder = fpv.address || "http://127.0.0.1:1234/v1";
+  $("#ai_fb_basewrap").hidden = fpv.id !== "custom" && !$("#ai_fb_base").value;
 }
 async function drawSettings() {
   const box = $("#sform"); if (!box) return;
@@ -2023,15 +2056,29 @@ async function drawSettings() {
   const body = $("#setbody");
   try {
     if (tab === "ai") {
-      const k = S.ai = await api("/api/ai");
+      const k = S.ai = await api("/api/ai"), fb = k.fallback || {};
+      const fbNote = fb.ready ? ` · Fallback: ${fb.label} (${fb.models?.[0] || ""})` : "";
       body.innerHTML = `<section class="set-sec"><h2>AI</h2><p class="help">PeakCut uses an AI model to pick the moments worth clipping and to write hooks, titles and captions. Use your own key from any of these services. You pay that service directly. Without a key, clips are picked by loudness.</p>
-          <div class="ai-state">${k.ready ? `<span class="pill ok">${ic("check")}Ready</span><span class="sub">${esc(k.label)} · ${esc(k.models[0] || "")}</span>` : `<span class="pill warn">Not set up</span><span class="sub">Choose a service, paste your key and pick a model.</span>`}</div>
+          <div class="ai-state">${k.ready ? `<span class="pill ok">${ic("check")}Ready</span><span class="sub">${esc(k.label)} · ${esc((k.models[0] || "") + fbNote)}</span>` : `<span class="pill warn">Not set up</span><span class="sub">Choose a service, paste your key and pick a model.</span>`}</div>
           <div class="ai-form">
             <label class="f">AI service<select id="ai_provider">${k.providers.map(x => `<option value="${esc(x.id)}" ${x.id === k.provider ? "selected" : ""}>${esc(x.label)}</option>`).join("")}</select></label>
             <label class="f">Key<input id="ai_key" type="password" autocomplete="off" spellcheck="false"><span class="hint" id="ai_keyhint"></span></label>
             <label class="f" id="ai_basewrap">Address<input id="ai_base" value="${esc(k.base_url || "")}" spellcheck="false"><span class="hint">Where the service answers. Only needed for a custom service.</span></label>
             <label class="f">Model<span class="with"><input id="ai_model" list="ai_models" value="${esc(k.models.join(", "))}" spellcheck="false"><button class="btn" type="button" data-act="aimodels">Find models</button></span>
               <datalist id="ai_models"></datalist><span class="hint">A fast, inexpensive model is the right choice. Add a second one after a comma to fall back on.</span></label>
+          </div>
+          <div style="margin-top:26px;padding-top:22px;border-top:1px solid var(--line)">
+            <h2>Fallback AI (optional)</h2>
+            <p class="help">If every model on your main AI service hits a rate limit or fails, PeakCut switches to this backup service automatically without stopping the stream or video.</p>
+            <div class="ai-form">
+              <label class="f">Fallback service<select id="ai_fb_provider"><option value="">None</option>${k.providers.map(x => `<option value="${esc(x.id)}" ${x.id === fb.provider ? "selected" : ""}>${esc(x.label)}</option>`).join("")}</select></label>
+              <div id="ai_fb_wrap" class="ai-form" ${fb.provider ? "" : "hidden"}>
+                <label class="f">Fallback key<input id="ai_fb_key" type="password" autocomplete="off" spellcheck="false"><span class="hint" id="ai_fb_keyhint"></span></label>
+                <label class="f" id="ai_fb_basewrap">Fallback address<input id="ai_fb_base" value="${esc(fb.base_url || "")}" spellcheck="false"><span class="hint">Where the fallback service answers. Only needed for a custom service.</span></label>
+                <label class="f">Fallback model<span class="with"><input id="ai_fb_model" list="ai_fb_models" value="${esc((fb.models || []).join(", "))}" spellcheck="false"><button class="btn" type="button" data-act="aimodels" data-target="fb">Find models</button></span>
+                  <datalist id="ai_fb_models"></datalist><span class="hint">Tried in order when the main AI service cannot answer.</span></label>
+              </div>
+            </div>
           </div>
           <div class="row" style="margin-top:20px"><button class="btn primary" data-act="aisave">Save and test</button>${k.ready ? `<button class="btn" data-act="aitest">Test again</button>` : ""}</div></section>`;
       aiHints();
@@ -2235,7 +2282,8 @@ document.addEventListener("change", async e => {
     if (t.id === "o_captions") t.dataset.overridden = "true";
     syncCaptionStyle(t);
   }
-  if (t.id === "ai_provider") { $("#ai_models").innerHTML = ""; if (S.ai && t.value !== S.ai.provider) { $("#ai_model").value = ""; $("#ai_base").value = ""; } return aiHints(); }
+  if (t.id === "ai_provider") return aiHints("main");
+  if (t.id === "ai_fb_provider") return aiHints("fb");
   if (t.dataset.sel) {
     const k = t.dataset.sel;
     if (t.checked) sel().add(k); else sel().delete(k);
@@ -2264,22 +2312,35 @@ document.addEventListener("click", async e => {
     if (a === "go") { closePops(); return go(d.v, d.tab); }
     if (a === "aimodels") {
       b.disabled = true;
+      const isFb = d.target === "fb";
+      const prov = $(isFb ? "#ai_fb_provider" : "#ai_provider").value;
+      const base = $(isFb ? "#ai_fb_base" : "#ai_base").value;
+      const key = $(isFb ? "#ai_fb_key" : "#ai_key").value;
       try {
-        const r = await send("/api/ai/models", {provider: $("#ai_provider").value, base_url: $("#ai_base").value, key: $("#ai_key").value});
-        $("#ai_models").innerHTML = r.models.map(m => `<option value="${esc(m)}">`).join("");
+        const r = await send("/api/ai/models", {provider: prov, base_url: base, key});
+        $(isFb ? "#ai_fb_models" : "#ai_models").innerHTML = r.models.map(m => `<option value="${esc(m)}">`).join("");
         toast(r.models.length ? `${r.models.length} models found. Click the model box to pick one.` : "The service listed no models. Type the model yourself.", r.models.length ? "ok" : "");
-        if (r.models.length) $("#ai_model").focus();
+        if (r.models.length) $(isFb ? "#ai_fb_model" : "#ai_model").focus();
       } finally { b.disabled = false; }
       return;
     }
     if (a === "aisave" || a === "aitest") {
       b.disabled = true;
       try {
-        if (a === "aisave") await send("/api/ai", {provider: $("#ai_provider").value, models: $("#ai_model").value, base_url: $("#ai_base").value, key: $("#ai_key").value}, "PUT");
+        if (a === "aisave") {
+          const fbProv = $("#ai_fb_provider")?.value || "";
+          await send("/api/ai", {
+            provider: $("#ai_provider").value, models: $("#ai_model").value, base_url: $("#ai_base").value, key: $("#ai_key").value,
+            fallback_provider: fbProv, fallback_models: fbProv ? $("#ai_fb_model").value : "",
+            fallback_base_url: fbProv ? $("#ai_fb_base").value : "", fallback_key: fbProv ? $("#ai_fb_key").value : ""
+          }, "PUT");
+        }
         let ok = null, why = "";
         try { ok = await send("/api/ai/test"); } catch (err) { why = err.message; }
         S.status = await api("/api/status"); drawShell(); await drawSettings();
-        if (ok) toast(`Saved. ${ok.model} answered, so the AI is ready.`, "ok");
+        if (ok && ok.fallback_ok === false) toast(`Saved. ${ok.model} answered, but the fallback failed: ${ok.fallback_error}`, "bad");
+        else if (ok && ok.fallback_ok === true) toast(`Saved. ${ok.model} answered, and fallback ${ok.fallback_model} is ready.`, "ok");
+        else if (ok) toast(`Saved. ${ok.model} answered, so the AI is ready.`, "ok");
         else toast(`Saved, but the test failed. ${why}`, "bad");
       } finally { b.disabled = false; }
       return;
