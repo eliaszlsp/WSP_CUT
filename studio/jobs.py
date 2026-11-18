@@ -438,7 +438,10 @@ def render_one(job, clip, words):
         if not use_clip_src:
             clip["end"] = min(clip["end"], job["duration"])
         local = dict(clip, start=clip["start"] - off, end=clip["end"] - off, hook=roman.to_roman(clip.get("hook") or ""))
-        need_caps = clip.get("captions", False if clip.get("layout") == "horizontal" else True)
+        if clip.get("segments") and off:
+            local["segments"] = [{"start": round(float(s["start"]) - off, 2), "end": round(float(s["end"]) - off, 2)} for s in clip["segments"]]
+        is_16_9 = clip.get("format") == "16:9" or clip.get("layout") == "horizontal"
+        need_caps = False if is_16_9 else clip.get("captions", True)
         near = _caption_words(job, clip, words, off) if need_caps else []
         out = render.render_clip(src, d / "clips", clip["id"], local, near, job["width"], job["height"])
         clip.update(out, status="done", version=clip.get("version", 0) + 1, error=None)
@@ -837,6 +840,13 @@ def _run_job(job):
         job["ai"] = {"model": model, "tokens": tokens, "note": "", "log": notes[-5:]}
         job["done_blocks"] = bi + 1       # a restart from here on carries on with the next part
         save(job)
+    long_enq, long_tok, long_model = _apply_long_and_derived(job, words, db, span, lo, game, notes, face=face)
+    tokens += long_tok
+    model = long_model or model
+    for c in long_enq:
+        futures.append((renders.submit(ctx.bind(make), c, list(words)), c))
+    if long_enq:
+        save(job)
     if futures:
         _set(job, stage="Finishing the clips", progress=max(job["progress"], 0.92))
     _wait_for_clips(job, futures, began, renders._max_workers)
@@ -862,6 +872,119 @@ def _run_job(job):
     except Exception:  # noqa: BLE001
         pass
     creators.log(job["creator"], f"Video finished with {len(clips)} clips in {round(time.time() - t0)}s: {job['title']}")
+
+
+def _apply_long_and_derived(job, words, db, span, lo, game, notes, face=None):
+    """Generate 16:9 long blocks, derived 9:16 Shorts (parent_clip), and 16:9 compilations after blocks finish."""
+    o = job["options"]
+    long_mode = o.get("long_mode", "off")
+    if long_mode == "off":
+        return [], 0, None
+    long_min_len = int(o.get("long_min_len", 600))
+    long_max_len = int(o.get("long_max_len", 1200))
+    out_lang = o.get("output_lang", config.OUTPUT_LANG)
+    shift_lo = lo / 16000
+    enqueued, tokens, model = [], 0, None
+    if long_mode in ("block", "both") and span >= long_min_len and len(words) >= 20:
+        shifted_words = (
+            [dict(w, s=round(w["s"] - shift_lo, 2), e=round(w["e"] - shift_lo, 2)) for w in words]
+            if shift_lo else words
+        )
+        blocks, ai_long = brain.find_long_blocks(
+            shifted_words, db, span, job["title"], job["uploader"],
+            max_blocks=2, min_len=long_min_len, max_len=long_max_len,
+            log=notes.append, game=game, output_lang=out_lang,
+        )
+        tokens += ai_long.get("tokens", 0)
+        model = ai_long.get("model") or model
+        if ai_long.get("note"):
+            notes.append(ai_long["note"])
+        for idx, b in enumerate(blocks, 1):
+            b.update(
+                id=f"long{idx:02d}",
+                start=round(b["start"] + shift_lo, 2),
+                end=round(b["end"] + shift_lo, 2),
+                peak_t=round(b.get("peak_t", b["start"]) + shift_lo, 2),
+                style="clean",
+                layout="horizontal",
+                format="16:9",
+                clip_kind="long",
+                long_type="block",
+                captions=False,
+                output_lang=out_lang,
+                status="queued",
+                version=0,
+            )
+            job["clips"].append(b)
+            enqueued.append(b)
+            if o.get("derive_shorts", True):
+                short_cap = min(3, int(o.get("max_clips", 6)))
+                inside = [
+                    c for c in job["clips"]
+                    if c.get("format", "9:16") != "16:9" and c.get("clip_kind") != "long"
+                    and not c.get("parent_clip")
+                    and c["start"] >= b["start"] - 2 and c["end"] <= b["end"] + 2
+                ]
+                for c in inside[:short_cap]:
+                    c["parent_clip"] = b["id"]
+                if not inside:
+                    bw = [
+                        dict(w, s=round(w["s"] - b["start"], 2), e=round(w["e"] - b["start"], 2))
+                        for w in words if b["start"] <= w["s"] <= b["end"]
+                    ]
+                    if len(bw) >= 8:
+                        s0 = max(0, int(b["start"] - shift_lo))
+                        s1 = min(len(db), int(b["end"] - shift_lo) + 1)
+                        sub_clips, ai_sub = brain.find_clips(
+                            bw, db[s0:s1], b["end"] - b["start"], job["title"], job["uploader"],
+                            min(2, short_cap), int(o.get("min_len", 15)), int(o.get("max_len", 60)),
+                            notes.append, game=game, output_lang=out_lang,
+                        )
+                        tokens += ai_sub.get("tokens", 0)
+                        model = ai_sub.get("model") or model
+                        for sc in sub_clips:
+                            sc.update(
+                                id=f"clip{len(job['clips']) + 1:02d}",
+                                start=round(sc["start"] + b["start"], 2),
+                                end=round(sc["end"] + b["start"], 2),
+                                style=o["style"],
+                                layout=o["layout"],
+                                format="9:16",
+                                parent_clip=b["id"],
+                                captions=o.get("captions", True),
+                                output_lang=out_lang,
+                                status="queued",
+                                version=0,
+                            )
+                            if face:
+                                sc["facecam"] = face
+                            job["clips"].append(sc)
+                            enqueued.append(sc)
+    if long_mode in ("compile", "both"):
+        short_cands = [
+            c for c in job["clips"]
+            if c.get("format", "9:16") != "16:9" and c.get("clip_kind") != "long" and c.get("status") != "error"
+        ]
+        comp = brain.build_compilation(
+            short_cands, title=job["title"], uploader=job["uploader"],
+            min_len=long_min_len, max_len=long_max_len, game=game, output_lang=out_lang,
+        )
+        if comp:
+            comp.update(
+                id="comp01",
+                style="clean",
+                layout="horizontal",
+                format="16:9",
+                clip_kind="long",
+                long_type="compile",
+                captions=False,
+                output_lang=out_lang,
+                status="queued",
+                version=0,
+            )
+            job["clips"].append(comp)
+            enqueued.append(comp)
+    return enqueued, tokens, model
 
 
 def _worker(quick_only=False):

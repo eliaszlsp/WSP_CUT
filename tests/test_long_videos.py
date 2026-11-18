@@ -25,7 +25,7 @@ os.environ["DATABASE_URL"] = ""
 os.environ["PEAKCUT_ACCOUNTS"] = "0"
 tempfile.tempdir = str(TMP_DIR)
 
-from studio import accounts, creators, ctx, db, jobs, posting  # noqa: E402
+from studio import accounts, brain, creators, ctx, db, jobs, live, media, posting, render  # noqa: E402
 
 db.init()
 
@@ -279,6 +279,180 @@ with ctx.as_user(UID):
         except StopLoop:
             pass
     check("_run processes priority 1 -> 2 -> 3", order, ["p1", "p2", "p3"])
+
+# ---- 4. Task 2: brain.find_long_blocks & brain.build_compilation ----
+import numpy as np  # noqa: E402
+import subprocess  # noqa: E402
+
+long_words = []
+t_cur = 0.0
+for s_i in range(540):  # ~2700s (45 min)
+    for w_i in range(10):
+        tok = "fim." if w_i == 9 else f"palavra{w_i}"
+        long_words.append({"w": tok, "s": round(t_cur, 2), "e": round(t_cur + 0.4, 2)})
+        t_cur += 0.48
+    t_cur += 0.2
+
+long_db = np.full(2700, -30.0, dtype=np.float32)
+long_db[700:715] = -5.0
+
+ai_calls = []
+
+
+def fake_ask_ai(prompt, schema=None, purpose="", timeout=None):
+    ai_calls.append(purpose)
+    if len(ai_calls) == 1:
+        return ([{
+            "start": 100.0, "end": 820.0, "score": 88,
+            "title": "A Grande Virada no Final", "description": "Partida épica.",
+            "hashtags": ["gaming", "clutch"], "thumb_text": "VIRADA ÉPICA",
+            "peak_t": 9999.0,  # out of range -> should clamp inside [start, end]
+            "reason": "Arco completo com virada.",
+        }], "test-model", 150)
+    return ([], "test-model", 50)
+
+
+with patch.object(brain, "ask_ai", side_effect=fake_ask_ai):
+    blocks, info_long = brain.find_long_blocks(
+        long_words, long_db, 2700.0, title="Live Teste", uploader="Streamer",
+        max_blocks=2, min_len=600, max_len=1200, output_lang="pt",
+    )
+
+check("find_long_blocks uses 30m overlapping windows (2 calls for 45m)", len(ai_calls), 2)
+check("find_long_blocks returns 1 block", len(blocks), 1)
+if blocks:
+    b0 = blocks[0]
+    check("long block format is 16:9", b0.get("format"), "16:9")
+    check("long block clip_kind is long", b0.get("clip_kind"), "long")
+    check("long block long_type is block", b0.get("long_type"), "block")
+    check("long block duration in [600, 1200]", 600 <= (b0["end"] - b0["start"]) <= 1200, True)
+    check("long block has thumb_text", bool(b0.get("thumb_text")), True)
+    check("long block clamps peak_t inside [start, end]", b0["start"] <= b0["peak_t"] <= b0["end"], True)
+
+# Fallback by loudness when AI fails
+with patch.object(brain, "ask_ai", side_effect=RuntimeError("AI down")):
+    fb_blocks, fb_info = brain.find_long_blocks(
+        long_words, long_db, 2700.0, title="Live Teste", uploader="Streamer",
+        max_blocks=2, min_len=600, max_len=1200, output_lang="pt",
+    )
+check("find_long_blocks falls back to loudness when AI unavailable", len(fb_blocks) >= 1, True)
+if fb_blocks:
+    check("fallback block format is 16:9", fb_blocks[0].get("format"), "16:9")
+    check("fallback block duration >= 600", fb_blocks[0]["end"] - fb_blocks[0]["start"] >= 599, True)
+
+# build_compilation: returns None if < min_len
+short_only = [{"start": 10.0, "end": 70.0, "score": 90, "hashtags": ["a"]}]
+check("build_compilation returns None when total < min_len",
+      brain.build_compilation(short_only, title="Live", min_len=600, max_len=1200), None)
+
+many_shorts = [
+    {"start": float(i * 100), "end": float(i * 100 + 80), "score": 70 + (i % 20), "hashtags": ["gta"]}
+    for i in range(12)
+]
+comp = brain.build_compilation(many_shorts, title="Live GTA", min_len=600, max_len=1200, output_lang="pt")
+check("build_compilation returns dict when >= min_len", isinstance(comp, dict), True)
+if comp:
+    seg_dur = sum(s["end"] - s["start"] for s in comp["segments"])
+    check("compilation total segment duration in [600, 1200]", 600 <= seg_dur <= 1200, True)
+    check("compilation segments sorted chronologically",
+          all(comp["segments"][i]["start"] <= comp["segments"][i + 1]["start"] for i in range(len(comp["segments"]) - 1)), True)
+    check("compilation format is 16:9", comp.get("format"), "16:9")
+    check("compilation long_type is compile", comp.get("long_type"), "compile")
+    check("compilation has thumb_text", bool(comp.get("thumb_text")), True)
+
+# ---- 5. Task 2: render.render_clip 16:9 & compilation segments ----
+syn_src = TMP_DIR / "syn_16_9.mp4"
+subprocess.run(
+    [
+        "ffmpeg", "-y", "-v", "error",
+        "-f", "lavfi", "-i", "testsrc=duration=3:size=1280x720:rate=30",
+        "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-ar", "48000", str(syn_src),
+    ],
+    check=True,
+)
+render_out = TMP_DIR / "render_out"
+res_16_9 = render.render_clip(
+    syn_src, render_out, "long_test",
+    {"start": 0.0, "end": 1.5, "format": "16:9", "layout": "blur", "captions": False, "peak_t": 0.8},
+    [], 1280, 720, aspect="16:9",
+)
+check("render_clip 16:9 returns horizontal layout", res_16_9.get("layout"), "horizontal")
+mp4_16_9 = render_out / "long_test.mp4"
+jpg_16_9 = render_out / "long_test.jpg"
+check("render_clip 16:9 wrote mp4", mp4_16_9.is_file(), True)
+check("render_clip 16:9 wrote jpg", jpg_16_9.is_file(), True)
+if mp4_16_9.is_file():
+    p_info = media.probe(mp4_16_9)
+    check("render_clip 16:9 width is 1920", p_info["width"], 1920)
+    check("render_clip 16:9 height is 1080", p_info["height"], 1080)
+
+res_comp = render.render_clip(
+    syn_src, render_out, "comp_test",
+    {
+        "start": 0.0, "end": 2.5, "format": "16:9", "layout": "horizontal", "captions": False,
+        "segments": [{"start": 0.0, "end": 1.0}, {"start": 1.5, "end": 2.5}],
+        "peak_t": 1.8,
+    },
+    [], 1280, 720, aspect="16:9",
+)
+check("render_clip compilation returns horizontal", res_comp.get("layout"), "horizontal")
+mp4_comp = render_out / "comp_test.mp4"
+jpg_comp = render_out / "comp_test.jpg"
+check("render_clip compilation wrote mp4", mp4_comp.is_file(), True)
+check("render_clip compilation wrote jpg", jpg_comp.is_file(), True)
+if mp4_comp.is_file():
+    c_info = media.probe(mp4_comp)
+    check("render_clip compilation width is 1920", c_info["width"], 1920)
+    check("render_clip compilation height is 1080", c_info["height"], 1080)
+    check("render_clip compilation duration ~2.0s", 1.5 <= c_info["duration"] <= 2.5, True)
+
+# ---- 6. Task 2: jobs derived Shorts & render_one 16:9 ----
+with ctx.as_user(UID):
+    j_drv = jobs.create({"type": "file", "name": "vod_long.mp4"}, {"long_mode": "both", "derive_shorts": True, "max_clips": 4}, enqueue=False)
+    j_drv["source_path"] = str(syn_src)
+    j_drv["width"] = 1280
+    j_drv["height"] = 720
+    j_drv["duration"] = 2100.0
+    j_drv["clips"] = [
+        {"id": "clip01", "start": 150.0, "end": 195.0, "score": 85, "format": "9:16", "status": "done"},
+        {"id": "clip02", "start": 1900.0, "end": 1945.0, "score": 80, "format": "9:16", "status": "done"},
+    ]
+    jobs.save(j_drv)
+
+    with patch.object(brain, "find_long_blocks", return_value=([
+        {"start": 100.0, "end": 800.0, "score": 90, "title": "Bloco 1", "description": "", "hashtags": [], "thumb_text": "BLOCO 1", "peak_t": 200.0, "format": "16:9", "clip_kind": "long", "long_type": "block"},
+        {"start": 1000.0, "end": 1700.0, "score": 85, "title": "Bloco 2", "description": "", "hashtags": [], "thumb_text": "BLOCO 2", "peak_t": 1200.0, "format": "16:9", "clip_kind": "long", "long_type": "block"},
+    ], {"model": "test", "tokens": 10, "note": ""})), \
+         patch.object(brain, "find_clips", return_value=([
+             {"start": 50.0, "end": 95.0, "score": 82, "hook": "CHEGOU", "title": "Sub", "description": "", "hashtags": [], "highlight_words": [], "reason": "peak"}
+         ], {"model": "test", "tokens": 5, "note": ""})), \
+         patch.object(brain, "build_compilation", return_value=None):
+        enq = jobs._apply_long_and_derived(j_drv, long_words, long_db, 2100.0, 0, "", [])
+
+    long_ids = [c["id"] for c in j_drv["clips"] if c.get("format") == "16:9"]
+    check("jobs._apply_long_and_derived adds 2 long blocks", len(long_ids), 2)
+    check("clip01 tagged with parent_clip long01", j_drv["clips"][0].get("parent_clip"), "long01")
+    check("clip02 outside blocks has no parent_clip", j_drv["clips"][1].get("parent_clip"), None)
+    derived_for_b2 = [c for c in j_drv["clips"] if c.get("parent_clip") == "long02"]
+    check("derived short extracted for block 2 when none fell inside", len(derived_for_b2) >= 1, True)
+
+    # render_one skips _caption_words for 16:9 and passes aspect="16:9"
+    long_clip_obj = {"id": "long_r1", "start": 0.0, "end": 1.5, "score": 90, "title": "L", "description": "", "hashtags": [], "hook": "", "format": "16:9", "layout": "horizontal", "captions": False, "status": "queued", "version": 0}
+    j_drv["clips"].append(long_clip_obj)
+    with patch.object(jobs, "_caption_words", side_effect=AssertionError("should not caption 16:9")), \
+         patch.object(render, "render_clip", return_value={"file": "long_r1.mp4", "cover": "long_r1.jpg", "layout": "horizontal"}) as m_rc:
+        jobs.render_one(j_drv, long_clip_obj, [])
+        check("render_one passes format='16:9' for 16:9 clip", m_rc.call_args.args[3].get("format"), "16:9")
+
+    # live.Session._finalize_long safety with empty/pruned segments
+    c_live = creators.create({"name": "Live Comp", "long_mode": "compile", "long_min_len": 600, "long_max_len": 1200})
+    j_live = jobs.create({"type": "live", "url": "https://twitch.tv/x", "name": "Live Comp"}, {}, enqueue=False, creator=c_live["id"], kind="live")
+    sess = live.Session(j_live, c_live)
+    sess.segments = []  # pruned / empty
+    sess._finalize_long()
+    check("live.Session._finalize_long handles pruned segments without error", True, True)
 
 print(f"\nSummary: {len(fails)} failed" if fails else "\nALL PASSED")
 sys.exit(1 if fails else 0)

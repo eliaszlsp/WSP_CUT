@@ -136,6 +136,7 @@ class Session:
         self.chat_total = 0
         self.chat_on = False
         self.last_check = 0.0
+        self.last_long_check = 0.0
         self.words_at_check = 0
         self.checks = 0
         self.rejected = 0
@@ -157,6 +158,7 @@ class Session:
         self.facecam_box = None       # where the webcam is, found once the first clip is made
         self.facecam_checked = False  # the look is made once, even when it finds nothing
         self.ai_busy = 0.0            # when the AI check now running was started, 0 when none is
+        self.long_ai_busy = 0.0       # when the long-form AI check now running was started, 0 when none is
 
     def _ask_ai(self, window=None, why=None):
         """Ask the AI on its own thread, so a slow answer never stops the recording.
@@ -177,6 +179,50 @@ class Session:
                 self.ai_busy = 0.0
         self.ai_busy = now
         threading.Thread(target=ctx.bind(work), daemon=True, name="ai_check").start()
+
+    def _ask_long_ai(self):
+        """Run the long-form (10-15 min) YouTube clip scout on its own thread."""
+        now = time.time()
+        if self.long_ai_busy and now - self.long_ai_busy < config.LIVE_AI_TIMEOUT + 60:
+            return
+
+        def work():
+            try:
+                self._long_ai_check()
+            except Exception as e:  # noqa: BLE001
+                self.job["ai"]["last_error"] = str(e)[-200:]
+            finally:
+                self.long_ai_busy = 0.0
+        self.long_ai_busy = now
+        threading.Thread(target=ctx.bind(work), daemon=True, name="long_ai_check").start()
+
+    def _long_ai_check(self):
+        st = self.settings
+        now = self.t_done
+        self.last_long_check = now
+        min_len = int(st.get("long_min_len", 600))
+        max_len = int(st.get("long_max_len", 900))
+        every_min = int(st.get("long_every_min", 20))
+        ws = max(0.0, now - max(max_len + 120, every_min * 60 + 180))
+        win = [w for w in self.words if ws <= w["s"] <= now]
+        if len(win) < 40 or now - ws < min_len:
+            return
+        usage.set_context(self.job["creator"], self.job["title"] or "Live stream (long)")
+        existing = [c for c in self.job["clips"] if c.get("clip_kind") == "long"]
+        cands, tok = brain.find_long_clips(
+            win, ws, now, self.job["title"], self.job["uploader"],
+            min_len=min_len, max_len=max_len, existing=existing,
+            game=self._game(), timeout=config.LIVE_AI_TIMEOUT,
+            output_lang=st.get("output_lang", config.OUTPUT_LANG),
+        )
+        self.checks += 1
+        self.tokens += tok
+        min_score = int(st.get("long_min_score", 70))
+        for c in cands:
+            if c.get("score", 0) < min_score:
+                continue
+            self._add_long_clip(c)
+            break
 
     def _find_facecam(self, src):
         """Where the webcam is in the stream, once. Only a sure answer is used.
@@ -310,7 +356,10 @@ class Session:
                     self.segments.append((self.buf / name, self.seg_clock, self.seg_clock + dur))
                     self.seg_clock += dur
                 self.csv_seen[i] = len(rows)
-            keep_from = self.seg_clock - self.settings["buffer_min"] * 60
+            keep_min = self.settings["buffer_min"]
+            if self.settings.get("long_enabled"):
+                keep_min = max(keep_min, int(self.settings.get("long_max_len", 900)) // 60 + 15)
+            keep_from = self.seg_clock - keep_min * 60
             while self.segments and self.segments[0][2] < keep_from:
                 self.segments.pop(0)[0].unlink(missing_ok=True)
 
@@ -450,10 +499,11 @@ class Session:
         st = self.settings
         every = int(st.get("ai_every_min", 3)) or 3
         if window:                    # just the stretch around a jump, or around someone saying "clip"
-            ws, now = max(0.0, window[0]), window[1]
+            now = min(window[1], self.t_done)
+            ws = max(0.0, min(window[0], now - max(60, int(st.get("max_len", 60)) + 30)))
         else:
             now = self.t_done
-            ws = max(0.0, now - max(every, 3) * 60 - 90)  # each check overlaps the last by 90 s, so nothing falls between
+            ws = max(0.0, now - max(every * 60 + 90, int(st.get("max_len", 60)) + 60))  # each check overlaps the last, and is always wide enough for max_len
         self.last_check = self.t_done
         win = [w for w in self.words if ws <= w["s"] <= now]
         recent = [c for c in self.job["clips"] if c.get("score", 0) > 0 and time.time() - c.get("made_at", 0) < 3600]
@@ -589,6 +639,113 @@ class Session:
         jobs.save(self.job)
         jobs.submit_live(lambda: self._render(c))
 
+    def _finalize_long(self):
+        """At stream end (before buffer cleanup), build a 16:9 compilation or block from whatever is still in buffer."""
+        st = self.settings
+        long_mode = st.get("long_mode", "off")
+        if long_mode not in ("block", "compile", "both"):
+            return
+        long_min_len = int(st.get("long_min_len", 600))
+        long_max_len = int(st.get("long_max_len", 1200))
+        out_lang = st.get("output_lang", config.OUTPUT_LANG)
+        with self.lock:
+            segs = [s for s in self.segments if s[0].exists()]
+            clips_copy = list(self.job.get("clips") or [])
+            words_copy = list(self.words)
+        if not segs:
+            return
+        buf_start, buf_end = segs[0][1], segs[-1][2]
+        if long_mode in ("block", "both") and int(st.get("buffer_min", 0)) >= 20 and (buf_end - buf_start) >= long_min_len:
+            if not any(c.get("long_type") == "block" for c in clips_copy):
+                win = [dict(w, s=round(w["s"] - buf_start, 2), e=round(w["e"] - buf_start, 2))
+                       for w in words_copy if buf_start <= w["s"] <= buf_end]
+                if len(win) >= 20:
+                    db_slice = np.array(self.db[int(buf_start):int(buf_end) + 1], dtype=np.float32) if self.db else np.zeros(int(buf_end - buf_start) + 1, dtype=np.float32)
+                    blocks, _ = brain.find_long_blocks(
+                        win, db_slice, buf_end - buf_start, self.job.get("title", ""), self.job.get("uploader", ""),
+                        max_blocks=1, min_len=long_min_len, max_len=long_max_len, game=self._game(), output_lang=out_lang,
+                    )
+                    for b in blocks:
+                        b["start"] = round(b["start"] + buf_start, 2)
+                        b["end"] = round(b["end"] + buf_start, 2)
+                        b["peak_t"] = round(b.get("peak_t", b["start"]) + buf_start, 2)
+                        b["format"] = "16:9"
+                        self._add_long_clip(b)
+        if long_mode in ("compile", "both"):
+            avail = [
+                c for c in clips_copy
+                if c.get("format", "9:16") != "16:9" and c.get("clip_kind") != "long"
+                and c.get("status") != "error"
+                and c["start"] >= buf_start - 2 and c["end"] <= buf_end + 2
+            ]
+            comp = brain.build_compilation(
+                avail, title=self.job.get("title", ""), uploader=self.job.get("uploader", ""),
+                min_len=long_min_len, max_len=long_max_len, game=self._game(), output_lang=out_lang,
+            )
+            if comp:
+                self._add_long_clip(comp)
+
+    def _add_long_clip(self, c):
+        self.n += 1
+        c.update(id=f"clip{self.n:03d}", clip_kind="long", style="clean", layout="horizontal",
+                 captions=False,
+                 output_lang=self.job["options"].get("output_lang") or self.settings.get("output_lang") or config.OUTPUT_LANG,
+                 status="queued", version=0, made_at=time.time())
+        with self.lock:
+            self.job["clips"].append(c)
+        jobs.save(self.job)
+        jobs.submit_live(lambda: self._render(c))
+
+    def _spawn_series(self, long_clip):
+        """Chop a finished long-form clip into sequential Part 1, Part 2... vertical clips from its .src.ts."""
+        from . import posting
+        st = self.settings
+        parts = brain.split_series_parts(
+            list(self.words), long_clip["start"], long_clip["end"],
+            base_title=long_clip.get("title") or long_clip.get("hook") or self.job.get("title"),
+            base_hashtags=long_clip.get("hashtags", []),
+            part_min=int(st.get("series_part_min", 60)),
+            part_max=int(st.get("series_part_max", 90)),
+            score=long_clip.get("score", 80),
+            game=self._game(),
+            output_lang=long_clip.get("output_lang") or st.get("output_lang") or config.OUTPUT_LANG,
+        )
+        if not parts:
+            return
+        src_path = Path(long_clip["src"])
+        if st.get("layout") == "gameplay" and not self.facecam_checked and src_path.is_file():
+            self.facecam_box = self._find_facecam(src_path)
+            self.facecam_checked = True
+        created = []
+        with self.lock:
+            for pt in parts:
+                self.n += 1
+                pt.update(
+                    id=f"clip{self.n:03d}",
+                    clip_kind="series",
+                    series_id=long_clip["id"],
+                    src=long_clip["src"],
+                    src_offset=long_clip["src_offset"],
+                    src_end=long_clip["src_end"],
+                    style=st["style"],
+                    layout=st["layout"],
+                    captions=self.job["options"].get("captions", True),
+                    output_lang=long_clip.get("output_lang") or config.OUTPUT_LANG,
+                    status="queued",
+                    version=0,
+                    made_at=time.time(),
+                )
+                if self.facecam_box:
+                    pt["facecam"] = self.facecam_box
+                self.job["clips"].append(pt)
+                created.append(pt)
+        jobs.save(self.job)
+        creators.log(self.job["creator"], f"Split long video into {len(created)} sequential parts: {long_clip.get('title')}")
+        if st.get("autopost") and st.get("accounts"):
+            posting.enqueue_series(self.job, created, st["accounts"])
+        for pt in created:
+            jobs.submit_live(lambda pt=pt: jobs.render_one(self.job, pt, list(self.words)))
+
     def _render(self, clip):
         """Runs on the render worker: copy the needed buffer pieces, then make the clip."""
         deadline = time.time() + 45
@@ -633,6 +790,8 @@ class Session:
         clip["start"] = max(clip["start"], clip["src_offset"])
         clip["end"] = min(clip["end"], clip["src_end"])
         jobs.render_one(self.job, clip, list(self.words))
+        if clip.get("clip_kind") == "long" and clip.get("status") == "done" and self.settings.get("series_enabled"):
+            self._spawn_series(clip)
 
     def _align(self, src, guess, dur):
         """Where `src` really starts on the transcript clock. The video pieces and the audio feed keep separate
@@ -714,6 +873,13 @@ class Session:
                     self._ask_ai((sp["t"] - self.AUTO_BEFORE, sp["t"] + self.AUTO_AFTER), "Jump: " + sp["why"])
                 elif self.t_done - self.last_check >= every * 60 or (self.ended and not busy and self.t_done > self.last_check):
                     self._ask_ai()
+                if not self.user_stopped and self.settings.get("long_enabled"):
+                    long_every = int(self.settings.get("long_every_min", 20)) or 20
+                    if self.t_done >= int(self.settings.get("long_min_len", 600)) and (
+                        self.t_done - self.last_long_check >= long_every * 60
+                        or (self.ended and not busy and self.t_done - self.last_long_check >= int(self.settings.get("long_min_len", 600)))
+                    ):
+                        self._ask_long_ai()
                 self._publish()
             except Exception as e:  # noqa: BLE001
                 self.job["ai"]["last_error"] = str(e)[-200:]
@@ -721,8 +887,8 @@ class Session:
             # clip, and cleanup() deletes the buffer that clip is cut from. That is true after a stop as
             # well as at the end of a stream, so both wait for it. Stopping is still instant on the page:
             # stop() has already written the status.
-            if ((self.user_stopped and not self.manual and not self.ai_busy)
-                    or (self.ended and not busy and not self.ai_busy
+            if ((self.user_stopped and not self.manual and not self.ai_busy and not self.long_ai_busy)
+                    or (self.ended and not busy and not self.ai_busy and not self.long_ai_busy
                         and len(self.pending) < SR * 2 and not self.manual)):
                 break
             if not busy:
@@ -736,6 +902,7 @@ class Session:
         if failed:
             alerts.notify(f"recording failed for {self.job['source']['name']}: {self.job['error']}")
         else:
+            self._finalize_long()
             alerts.notify(f"recording finished for {self.job['source']['name']}: {len(self.job['clips'])} clips, "
                           f"{round(self.samples / SR / 60)} min.")
 

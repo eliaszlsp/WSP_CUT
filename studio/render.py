@@ -80,7 +80,8 @@ def install_fonts():
 
 
 LAYOUTS = {"blur": "Full frame + blurred fill", "zoom": "Zoomed in + blurred fill", "crop": "Fill the screen (centre crop)",
-           "gameplay": "Gameplay fills the screen, facecam in the corner"}
+           "gameplay": "Gameplay fills the screen, facecam in the corner",
+           "horizontal": "Horizontal 16:9 (full frame for YouTube)"}
 
 
 def _ts(t):
@@ -112,7 +113,10 @@ def _groups(words, per):
 
 
 def geometry(src_w, src_h, layout):
-    """Where the video sits in the 1080x1920 frame, and where hook and captions go."""
+    """Where the video sits in the output frame, and where hook and captions go."""
+    if layout == "horizontal":
+        out_h = 1080 if src_h >= 1080 else 720
+        return "horizontal", out_h, 0, out_h - 90
     if src_h >= src_w and layout != "crop":
         layout = "crop"  # already vertical or square: nothing to gain from a blurred fill
     if layout == "blur":
@@ -235,6 +239,10 @@ PIP_MARGIN = 26
 
 
 def _filter(layout, fg_h, facecam=None):
+    if layout == "horizontal":
+        out_w, out_h = (1920, 1080) if fg_h >= 1080 else (1280, 720)
+        return (f"[0:v]fps={config.OUT_FPS},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,"
+                f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1[v0];")
     if layout == "gameplay" and facecam:
         # The game fills the screen, and the webcam sits in the top corner of it, so a viewer sees
         # the play and the face at the same time.
@@ -266,58 +274,132 @@ _qsv_ok = None
 RENDER_SECONDS = 600      # one clip's video encode; far beyond normal, so a frozen encoder is stopped, not waited on
 
 
-def render_clip(src: Path, out_dir: Path, name: str, clip: dict, words: list, src_w: int, src_h: int) -> dict:
-    """Writes <name>.mp4, <name>.jpg and <name>.ass into out_dir. Returns file names."""
-    out_dir.mkdir(parents=True, exist_ok=True)
-    start, end = clip["start"], clip["end"]
-    layout, fg_h, hook_y, cap_y = geometry(src_w, src_h, clip.get("layout", "blur"))
-    face = clip.get("facecam")
-    if layout == "gameplay" and not (face and len(face) == 4):
-        layout = "crop"     # no webcam found: the game fills the screen, which is still the right shape
-    hook_y = _hook_y(layout, hook_y, face)
-    ass = build_ass(words if clip.get("captions", True) else [], start, end, clip.get("hook", ""), clip.get("style", "bounce"),
-                    clip.get("highlight_words", []), hook_y, cap_y)
-    # The clip is made in a short work folder and moved into place afterwards. The caption step of ffmpeg cannot
-    # open files whose full path is longer than 260 characters on Windows, which a data folder deep inside other
-    # folders easily reaches. Inside the work folder every name is short and relative (a drive colon would also
-    # break the filter syntax).
-    work = Path(tempfile.mkdtemp(prefix="pk"))
-    try:
-        return _render_in(work, src, out_dir, name, start, end, layout, fg_h, ass, face=face)
-    finally:
-        shutil.rmtree(work, ignore_errors=True)
-
-
-def _render_in(work: Path, src: Path, out_dir: Path, name: str, start, end, layout, fg_h, ass: str, face=None) -> dict:
+def _encode_cmd(work: Path, base: list, out_file: str, enc_timeout: int):
     global _qsv_ok
-    (work / f"{name}.ass").write_text(ass, encoding="utf-8")
-    (work / "f").mkdir()
-    for f in config.FONTS_DIR.glob("*.ttf"):
-        shutil.copyfile(f, work / "f" / f.name)
-    fc = _filter(layout, fg_h, face) + f"[v0]ass={name}.ass:fontsdir=f[v]"
-    base = ["ffmpeg", "-y", "-v", "error", "-ss", f"{start:.2f}", "-t", f"{end - start:.2f}", "-i", str(src),
-            "-filter_complex", fc, "-map", "[v]", "-map", "0:a:0", "-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
-            "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-movflags", "+faststart", "-pix_fmt"]
     encoders = []
     if _qsv_ok is not False:
         encoders.append(("qsv", ["nv12", "-c:v", "h264_qsv", "-global_quality", "23", "-preset", "fast"]))
     encoders.append(("x264", ["yuv420p", "-c:v", "libx264", "-crf", "21", "-preset", "veryfast"]))
     err = None
     for label, enc in encoders:
-        p = subprocess.run(base + enc + [f"{name}.mp4"], cwd=work, capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", creationflags=NO_WINDOW, timeout=RENDER_SECONDS)
+        p = subprocess.run(base + enc + [out_file], cwd=work, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", creationflags=NO_WINDOW, timeout=enc_timeout)
         if p.returncode == 0:
             if label == "qsv":
                 _qsv_ok = True
-            break
+            return
         err = p.stderr[-1200:]
         if label == "qsv":
             _qsv_ok = False
+    raise RuntimeError(f"Render failed: {err}")
+
+
+def render_compilation(src: Path, out_dir: Path, name: str, clip: dict, src_w: int, src_h: int) -> dict:
+    """Concatenate multiple highlight segments into a single 1920x1080 16:9 MP4 normalized to -14 LUFS."""
+    segments = clip.get("segments") or []
+    if not segments:
+        raise ValueError("No segments provided for compilation.")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tbase = config.TMP_DIR if len(str(config.TMP_DIR)) < 120 else None
+    if tbase:
+        tbase.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix="pk", dir=str(tbase) if tbase else None))
+    try:
+        fc = _filter("horizontal", 1080) + "[v0]null[v]"
+        part_files = []
+        total_dur = 0.0
+        cover_t = None
+        peak_t = clip.get("peak_t")
+        for idx, seg in enumerate(segments):
+            s, e = float(seg["start"]), float(seg["end"])
+            dur = max(0.1, e - s)
+            if cover_t is None and peak_t is not None and s <= float(peak_t) <= e:
+                cover_t = max(0.0, total_dur + (float(peak_t) - s))
+            total_dur += dur
+            part_name = f"seg_{idx:03d}.mp4"
+            enc_timeout = max(RENDER_SECONDS, int(dur * 2.5))
+            base = ["ffmpeg", "-y", "-v", "error", "-ss", f"{s:.2f}", "-t", f"{dur:.2f}", "-i", str(src),
+                    "-filter_complex", fc, "-map", "[v]", "-map", "0:a:0", "-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
+                    "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2", "-pix_fmt"]
+            _encode_cmd(work, base, part_name, enc_timeout)
+            part_files.append(part_name)
+        lst = work / "concat.txt"
+        lst.write_text("".join(f"file '{p}'\n" for p in part_files), encoding="utf-8")
+        run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", "concat.txt",
+             "-c", "copy", "-movflags", "+faststart", f"{name}.mp4"], cwd=work)
+        if cover_t is None:
+            cover_t = min(1.2, total_dur / 2)
+        cover_t = max(0.0, min(max(0.0, total_dur - 0.1), cover_t))
+        run(["ffmpeg", "-y", "-v", "error", "-ss", f"{cover_t:.2f}", "-i", f"{name}.mp4", "-frames:v", "1",
+             "-q:v", "3", f"{name}.jpg"], cwd=work)
+        for ext in ("mp4", "jpg"):
+            f = work / f"{name}.{ext}"
+            if f.exists():
+                shutil.move(str(f), str(out_dir / f"{name}.{ext}"))
+        return {"file": f"{name}.mp4", "cover": f"{name}.jpg", "layout": "horizontal"}
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def render_clip(src: Path, out_dir: Path, name: str, clip: dict, words: list, src_w: int, src_h: int,
+                aspect: str | None = None) -> dict:
+    """Writes <name>.mp4, <name>.jpg and <name>.ass into out_dir. Returns file names."""
+    if clip.get("segments"):
+        return render_compilation(src, out_dir, name, clip, src_w, src_h)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    start, end = clip["start"], clip["end"]
+    is_16_9 = aspect == "16:9" or clip.get("format") == "16:9"
+    req_layout = "horizontal" if is_16_9 else clip.get("layout", "blur")
+    layout, fg_h, hook_y, cap_y = geometry(src_w, src_h, req_layout)
+    if is_16_9:
+        fg_h = 1080
+    face = clip.get("facecam")
+    if layout == "gameplay" and not (face and len(face) == 4):
+        layout, fg_h, hook_y, cap_y = geometry(src_w, src_h, "blur")  # no single webcam found (e.g. multi-cam or HUD): keep full 16:9 frame
+    hook_y = _hook_y(layout, hook_y, face)
+    if layout == "horizontal":
+        ass = build_ass(words if clip.get("captions", False) else [], start, end, "", clip.get("style", "clean"),
+                        clip.get("highlight_words", []), hook_y, cap_y) if clip.get("captions", False) else ""
     else:
-        raise RuntimeError(f"Render failed: {err}")
-    cover_t = min(1.2, (end - start) / 2)
+        ass = build_ass(words if clip.get("captions", True) else [], start, end, clip.get("hook", ""), clip.get("style", "bounce"),
+                        clip.get("highlight_words", []), hook_y, cap_y)
+    # The clip is made in a short work folder and moved into place afterwards. The caption step of ffmpeg cannot
+    # open files whose full path is longer than 260 characters on Windows, which a data folder deep inside other
+    # folders easily reaches. Inside the work folder every name is short and relative (a drive colon would also
+    # break the filter syntax). Prefer PeakCut's own short TMP_DIR when short enough so a full C: drive never stops rendering.
+    tbase = config.TMP_DIR if len(str(config.TMP_DIR)) < 120 else None
+    if tbase:
+        tbase.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix="pk", dir=str(tbase) if tbase else None))
+    try:
+        return _render_in(work, src, out_dir, name, start, end, layout, fg_h, ass, face=face, peak_t=clip.get("peak_t"))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _render_in(work: Path, src: Path, out_dir: Path, name: str, start, end, layout, fg_h, ass: str,
+               face=None, peak_t=None) -> dict:
+    if ass:
+        (work / f"{name}.ass").write_text(ass, encoding="utf-8")
+        (work / "f").mkdir()
+        for f in config.FONTS_DIR.glob("*.ttf"):
+            shutil.copyfile(f, work / "f" / f.name)
+        fc = _filter(layout, fg_h, face) + f"[v0]ass={name}.ass:fontsdir=f[v]"
+    else:
+        fc = _filter(layout, fg_h, face) + "[v0]null[v]"
+    enc_timeout = max(RENDER_SECONDS, int((end - start) * 2.5))
+    base = ["ffmpeg", "-y", "-v", "error", "-ss", f"{start:.2f}", "-t", f"{end - start:.2f}", "-i", str(src),
+            "-filter_complex", fc, "-map", "[v]", "-map", "0:a:0", "-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
+            "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-movflags", "+faststart", "-pix_fmt"]
+    _encode_cmd(work, base, f"{name}.mp4", enc_timeout)
+    if peak_t is not None and start <= float(peak_t) <= end:
+        cover_t = max(0.0, min(max(0.0, (end - start) - 0.1), float(peak_t) - start))
+    else:
+        cover_t = min(1.2, (end - start) / 2)
     run(["ffmpeg", "-y", "-v", "error", "-ss", f"{cover_t:.2f}", "-i", f"{name}.mp4", "-frames:v", "1",
          "-q:v", "3", f"{name}.jpg"], cwd=work)
     for ext in ("mp4", "jpg", "ass"):
-        shutil.move(str(work / f"{name}.{ext}"), str(out_dir / f"{name}.{ext}"))
+        f = work / f"{name}.{ext}"
+        if f.exists():
+            shutil.move(str(f), str(out_dir / f"{name}.{ext}"))
     return {"file": f"{name}.mp4", "cover": f"{name}.jpg", "layout": layout}
