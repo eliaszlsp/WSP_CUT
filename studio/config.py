@@ -124,9 +124,12 @@ FONTS_DIR = DATA_DIR / "fonts"          # caption fonts, copied from studio/font
 # YouTube already has a word-by-word transcript of most videos. With this on, that is what the AI reads to find the
 # clips (seconds instead of transcribing hours), and our own model is run only on the clips themselves.
 YT_TRANSCRIPT = env("PEAKCUT_YT_TRANSCRIPT", "1") != "0"
-# the compact model for processors; a machine with a graphics card sets PEAKCUT_ASR_MODEL to the full-precision one
-ASR_MODEL_NAME = env("PEAKCUT_ASR_MODEL", "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8")
+# the compact multilingual model (25 languages incl. Portuguese and English); override with PEAKCUT_ASR_MODEL if needed
+ASR_MODEL_NAME = env("PEAKCUT_ASR_MODEL", "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8")
 ASR_MODEL_DIR = MODELS_DIR / ASR_MODEL_NAME
+# Default language for AI hooks, titles, descriptions and captions: "pt" (Português BR), "source" (same as spoken) or "en"
+_raw_out_lang = env("PEAKCUT_OUTPUT_LANG", "pt").strip().lower()
+OUTPUT_LANG = "pt" if _raw_out_lang.startswith("pt") else ("source" if _raw_out_lang in ("source", "original", "same") else ("en" if _raw_out_lang.startswith("en") else "pt"))
 DATABASE_URL = env("DATABASE_URL") or f"sqlite:///{(DATA_DIR / 'peakcut.db').as_posix()}"
 # Commercials and "be right back" screens are stitched into streams. A clip taken from one is worthless, so those
 # seconds can be found and left out. It is off by default: it reads the whole video once, which is not free, and
