@@ -196,10 +196,17 @@ ALLOWED_SITES = tuple(s.strip().lower() for s in env(
 AI_PROVIDER = env("PEAKCUT_AI_PROVIDER", "gemini").strip().lower()            # gemini, openai, xai, groq, openrouter, anthropic, ollama, custom
 AI_MODELS = [m.strip() for m in env("PEAKCUT_AI_MODELS", "").split(",") if m.strip()]   # tried in this order
 AI_BASE_URL = env("PEAKCUT_AI_BASE_URL", "").rstrip("/")                      # only for "custom", or to override a provider's address
+AI_FALLBACK_PROVIDER = env("PEAKCUT_AI_FALLBACK_PROVIDER", "").strip().lower()
+AI_FALLBACK_MODELS = [m.strip() for m in env("PEAKCUT_AI_FALLBACK_MODELS", "").split(",") if m.strip()]
+AI_FALLBACK_BASE_URL = env("PEAKCUT_AI_FALLBACK_BASE_URL", "").rstrip("/")
 
 
 def ai_key() -> str:
     return _secret("PEAKCUT_AI_KEY", "PEAKCUT_AI_KEY_FILE", r"\S{8,}")
+
+
+def ai_fallback_key() -> str:
+    return _secret("PEAKCUT_AI_FALLBACK_KEY", "PEAKCUT_AI_FALLBACK_KEY_FILE", r"\S{8,}")
 
 
 def ai_ready() -> bool:

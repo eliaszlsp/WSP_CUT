@@ -7,7 +7,9 @@ import tempfile
 
 os.environ["PEAKCUT_DATA"] = tempfile.mkdtemp(prefix="pc-ai-")
 os.environ["DATABASE_URL"] = ""
-os.environ.update(PEAKCUT_AI_PROVIDER="gemini", PEAKCUT_AI_MODELS="model-a, model-b", PEAKCUT_AI_KEY="test-key-123456", PEAKCUT_AI_BASE_URL="")
+os.environ.update(PEAKCUT_AI_PROVIDER="gemini", PEAKCUT_AI_MODELS="model-a, model-b", PEAKCUT_AI_KEY="test-key-123456", PEAKCUT_AI_BASE_URL="",
+                  PEAKCUT_AI_FALLBACK_PROVIDER="", PEAKCUT_AI_FALLBACK_MODELS="", PEAKCUT_AI_FALLBACK_KEY="",
+                  PEAKCUT_AI_FALLBACK_KEY_FILE="", PEAKCUT_AI_FALLBACK_BASE_URL="")
 sys.path.insert(0, ".")
 from studio import ai, auth, brain, config, ctx, db, usage  # noqa: E402
 
@@ -112,6 +114,76 @@ with ctx.as_user(u1.id):
     check("usage says which AI is set", s["ready"] and s["provider"] == "Gemini" and s["model"] == "model-a")
 with ctx.as_user(u2.id):
     check("another user sees none of it", usage.summary({})["calls_total"] == 0)
+
+
+def _raises(exc, fn):
+    try:
+        fn()
+    except exc:
+        return True
+    return False
+
+
+# ---- per-provider credential vault, legacy migration and fallback targets
+(config.DATA_DIR / "ai.json").write_text(json.dumps({
+    "provider": "openrouter", "models": ["openrouter/free"], "base_url": "", "key": "or-secret-key-9999"
+}), encoding="utf-8")
+ai._saved["at"] = None
+pub = ai.save("gemini", "gemini-2.5-flash, gemini-2.5-pro", "", "gem-secret-key-1111",
+              fallback_provider="openrouter", fallback_models=None, fallback_key=None)
+check("legacy key and model kept for fallback without retyping",
+      pub["ready"] and pub["fallback"]["ready"] and pub["fallback"]["key_hint"] == "9999"
+      and pub["fallback"]["models"] == ["openrouter/free"]
+      and ai.targets() == [("gemini", "gemini-2.5-flash"), ("gemini", "gemini-2.5-pro"), ("openrouter", "openrouter/free")],
+      str(pub))
+raw_saved = json.loads((config.DATA_DIR / "ai.json").read_text(encoding="utf-8"))
+check("top-level ai.json fields stay backward compatible",
+      raw_saved["provider"] == "gemini" and raw_saved["key"] == "gem-secret-key-1111")
+check("public() never exposes any key",
+      "gem-secret-key-1111" not in json.dumps(pub) and "or-secret-key-9999" not in json.dumps(pub))
+check("redact hides both primary and fallback keys",
+      ai.redact("bad gem-secret-key-1111 and or-secret-key-9999") == "bad <key> and <key>")
+check("same provider for primary and fallback is refused",
+      _raises(ValueError, lambda: ai.save("gemini", "gemini-2.5-flash", "", None, fallback_provider="gemini", fallback_models="m")))
+check("custom fallback without an address is refused",
+      _raises(ValueError, lambda: ai.save("gemini", "gemini-2.5-flash", "", None, fallback_provider="custom", fallback_models="m")))
+check("fallback service without a saved key needs one",
+      _raises(ValueError, lambda: ai.save("gemini", "gemini-2.5-flash", "", None, fallback_provider="openai", fallback_models="m")))
+
+# direct provider_id call + see() failover + test() dual check
+seen.clear()
+out, sent, wrote = ai.call("openrouter/free", "hello", brain.SCHEMA, provider_id="openrouter")
+check("call with explicit fallback provider uses its own url and key",
+      out == [CLIP] and "openrouter.ai" in seen[0][0] and seen[0][2].get("Authorization") == "Bearer or-secret-key-9999")
+
+
+def fake_post_failover(url, json=None, headers=None, timeout=None, **_k):  # noqa: A002
+    seen.append((url, json, headers or {}))
+    if "generativelanguage" in url:
+        return Reply(503, {"error": {"message": "overloaded gem-secret-key-1111"}})
+    return Reply(200, {"choices": [{"message": {"content": '["ok"]'}}], "usage": {"prompt_tokens": 11, "completion_tokens": 4}})
+
+
+ai.httpx.post = fake_post_failover
+seen.clear()
+pic_txt, pic_in, pic_out = ai.see("webcam?", b"\xff\xd8\xff\xd9")
+check("see() falls back to secondary provider when primary fails",
+      pic_txt == '["ok"]' and (pic_in, pic_out) == (11, 4) and "openrouter.ai" in seen[-1][0], str((pic_txt, seen)))
+
+ai.httpx.post = lambda url, json=None, headers=None, timeout=None, **_k: (  # noqa: A002
+    Reply(200, {"candidates": [{"content": {"parts": [{"text": '["ok"]'}]}}], "usageMetadata": {"promptTokenCount": 5, "totalTokenCount": 7}})
+    if "generativelanguage" in url else
+    Reply(200, {"choices": [{"message": {"content": '{"items":["ok"]}'}}], "usage": {"prompt_tokens": 6, "completion_tokens": 3}})
+)
+tst = ai.test()
+check("test() verifies both primary and fallback",
+      tst["ok"] and tst["model"] == "gemini-2.5-flash" and tst["fallback_ok"] is True and tst["fallback_model"] == "openrouter/free",
+      str(tst))
+
+pub_off = ai.save("gemini", "gemini-2.5-flash", "", None, fallback_provider="")
+check("clearing fallback leaves saved profile intact",
+      not pub_off["fallback"]["ready"] and ai.targets() == [("gemini", "gemini-2.5-flash")]
+      and pub_off["saved_profiles"]["openrouter"]["has_key"] is True)
 
 print("ALL PASSED" if not fails else f"{len(fails)} failed")
 import shutil  # noqa: E402
