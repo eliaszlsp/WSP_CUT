@@ -1723,6 +1723,78 @@ try:
            r_pub_404.status_code),
           (200, True, True, "private, no-store", 404))
 
+    # ---- 19. Task 4: Dashboard UI controls in Settings -> Storage, clip cards & clip modal + JS syntax validation
+    import subprocess
+
+    r_app = cl_alice.get("/app")
+    r_app_bob_stor = cl_bob.get("/app/settings/storage")
+    app_html = r_app.text
+    check("GET /app and non-admin GET /app/settings/storage serve dashboard HTML (200)",
+          (r_app.status_code, r_app_bob_stor.status_code, "<!doctype html>" in app_html.lower()),
+          (200, 200, True))
+
+    required_ui_tokens = (
+        '"cloud":',
+        "Google Drive archive",
+        "/oauth/gdrive/start",
+        "/oauth/gdrive/callback",
+        "/oauth/youtube/callback",
+        "/api/gdrive",
+        "/api/gdrive/sweep",
+        "/archive",
+        'data-act="gdsave"',
+        'data-act="gdsweep"',
+        'data-act="gddisconnect"',
+        'data-act="gdclip"',
+        'data-act="gdappsetup"',
+        'data-act="gdappsave"',
+        'id="gd_after_post"',
+        'id="gd_days"',
+        "gdrive_connected",
+        "gdrive_error",
+        "S.status.gdrive = got.gdrive",
+        "Open in Drive",
+        "Saved on Google Drive",
+    )
+    missing_ui = [tok for tok in required_ui_tokens if tok not in app_html]
+    check("web/index.html contains all Google Drive archive UI hooks, settings fields, and clip badges",
+          missing_ui,
+          [])
+
+    oauth_anchors = re.findall(r"<a\b[^>]*href=[\"']/oauth/gdrive/start[\"'][^>]*>", app_html)
+    drive_anchors = re.findall(r"<a\b[^>]*c\.drive\.url[^>]*>", app_html)
+    check("<a href='/oauth/gdrive/start'> and external Drive links exist and never carry data-act",
+          (len(oauth_anchors) >= 1,
+           len(drive_anchors) >= 2,
+           all("data-act=" not in tag for tag in oauth_anchors + drive_anchors)),
+          (True, True, True))
+
+    set_tabs_m = re.search(r"const setTabs = \(\) => \[(.*?)\];", app_html, re.S)
+    set_tabs_src = set_tabs_m.group(1) if set_tabs_m else ""
+    check("setTabs exposes Storage tab to all signed-in users (not gated on is_admin)",
+          ('"storage"' in set_tabs_src and 'is_admin ? [["storage"' not in set_tabs_src),
+          True)
+
+    check("PeakCut CSS rule: zero box-shadow rules in web/index.html",
+          "box-shadow" in app_html.lower(),
+          False)
+
+    inline_scripts = re.findall(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", app_html, re.S | re.I)
+    check("inline <script> block extracted from web/index.html", len(inline_scripts) >= 1, True)
+    combined_js = "\n;\n".join(inline_scripts)
+    js_tmp = DATA_DIR / "index_inline_check.js"
+    js_tmp.write_text(combined_js, encoding="utf-8")
+    node_bin = shutil.which("node")
+    if node_bin:
+        proc = subprocess.run([node_bin, "--check", str(js_tmp)], capture_output=True, text=True, timeout=20)
+        check("inline JavaScript passes `node --check` syntax validation",
+              (proc.returncode, proc.stderr.strip()),
+              (0, ""))
+    else:
+        check("inline JavaScript has balanced top-level script delimiters",
+              ("</script>" not in combined_js and combined_js.count("{") == combined_js.count("}")),
+              True)
+
     print("ALL PASSED" if not fails else f"{len(fails)} failed")
 finally:
     db.engine.dispose()

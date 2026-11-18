@@ -248,7 +248,9 @@ label.ck input{accent-color:var(--brand);margin:0}
 .tabbtn.on svg{color:var(--brand)}
 @keyframes tabin{from{transform:scaleX(.3);opacity:0}to{transform:none;opacity:1}}
 .pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;padding:2px 9px;border-radius:999px;background:var(--muted);color:var(--dim);white-space:nowrap;text-decoration:none}
+.pill svg{width:14px;height:14px}
 .pill.ok{color:var(--good);background:var(--good-soft)}
+a.pill.ok:hover{background:#D5EFE2}
 .pill.bad{color:var(--bad);background:var(--bad-soft)}
 .pill.warn{color:var(--brand-deep);background:var(--brand-soft)}
 .pill.live{color:#fff;background:var(--live)}
@@ -631,6 +633,7 @@ dialog::backdrop{background:rgba(14,12,11,.42);animation:fadein .16s ease}
 .editor video,.editor .stage img{width:100%;max-height:calc(100vh - 48px);aspect-ratio:9/16;object-fit:contain;display:block}
 .editor .panel{padding:22px;overflow:auto;display:flex;flex-direction:column;gap:14px}
 .editor h3{font-size:13px;font-weight:600;color:var(--dim);margin-top:6px}
+#darchnote:empty,#dposts:empty{display:none}
 .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 #toasts{position:fixed;right:20px;bottom:20px;display:flex;flex-direction:column;gap:8px;z-index:50}
 .toast{background:var(--frame);color:var(--frame-text);border:1px solid var(--frame-2);border-radius:var(--r);padding:12px 16px;max-width:380px;animation:rise .2s ease;display:flex;gap:10px;align-items:center;font-weight:500}
@@ -926,7 +929,8 @@ const I = {
  "signout": "<path d=\"M120,216a8,8,0,0,1-8,8H48a8,8,0,0,1-8-8V40a8,8,0,0,1,8-8h64a8,8,0,0,1,0,16H56V208h56A8,8,0,0,1,120,216Zm109.66-93.66-40-40a8,8,0,0,0-11.32,11.32L204.69,120H112a8,8,0,0,0,0,16h92.69l-26.35,26.34a8,8,0,0,0,11.32,11.32l40-40A8,8,0,0,0,229.66,122.34Z\"/>",
  "shield": "<path d=\"M208,40H48A16,16,0,0,0,32,56v56c0,52.72,25.52,84.67,46.93,102.19,23.06,18.86,46,25.26,47,25.53a8,8,0,0,0,4.2,0c1-.27,23.91-6.67,47-25.53C198.48,196.67,224,164.72,224,112V56A16,16,0,0,0,208,40Zm0,72c0,37.07-13.66,67.16-40.6,89.42A129.3,129.3,0,0,1,128,223.62a128.25,128.25,0,0,1-38.92-21.81C61.82,179.51,48,149.3,48,112l0-56,160,0ZM82.34,141.66a8,8,0,0,1,11.32-11.32L112,148.69l50.34-50.35a8,8,0,0,1,11.32,11.32l-56,56a8,8,0,0,1-11.32,0Z\"/>",
  "users": "<path d=\"M117.25,157.92a60,60,0,1,0-66.5,0A95.83,95.83,0,0,0,3.53,195.63a8,8,0,1,0,13.4,8.74,80,80,0,0,1,134.14,0,8,8,0,0,0,13.4-8.74A95.83,95.83,0,0,0,117.25,157.92ZM40,108a44,44,0,1,1,44,44A44.05,44.05,0,0,1,40,108Zm210.14,98.7a8,8,0,0,1-11.07-2.33A79.83,79.83,0,0,0,172,168a8,8,0,0,1,0-16,44,44,0,1,0-16.34-84.87,8,8,0,1,1-5.94-14.85,60,60,0,0,1,55.53,105.64,95.83,95.83,0,0,1,47.22,37.71A8,8,0,0,1,250.14,206.7Z\"/>",
- "lock": "<path d=\"M128,112a28,28,0,0,0-8,54.83V184a8,8,0,0,0,16,0V166.83A28,28,0,0,0,128,112Zm0,40a12,12,0,1,1,12-12A12,12,0,0,1,128,152Zm80-72H176V56a48,48,0,0,0-96,0V80H48A16,16,0,0,0,32,96V208a16,16,0,0,0,16,16H208a16,16,0,0,0,16-16V96A16,16,0,0,0,208,80ZM96,56a32,32,0,0,1,64,0V80H96ZM208,208H48V96H208V208Z\"/>"
+ "lock": "<path d=\"M128,112a28,28,0,0,0-8,54.83V184a8,8,0,0,0,16,0V166.83A28,28,0,0,0,128,112Zm0,40a12,12,0,1,1,12-12A12,12,0,0,1,128,152Zm80-72H176V56a48,48,0,0,0-96,0V80H48A16,16,0,0,0,32,96V208a16,16,0,0,0,16,16H208a16,16,0,0,0,16-16V96A16,16,0,0,0,208,80ZM96,56a32,32,0,0,1,64,0V80H96ZM208,208H48V96H208V208Z\"/>",
+ "cloud": "<path d=\"M160,40A88.09,88.09,0,0,0,81.29,88.67,64,64,0,1,0,72,216h88a88,88,0,0,0,0-176Zm0,160H72a48,48,0,0,1,0-96c1.1,0,2.2,0,3.29.11A88,88,0,0,0,72,128a8,8,0,0,0,16,0,72,72,0,1,1,72,72Z\"/>"
 };
 const ic = n => `<svg viewBox="0 0 256 256" aria-hidden="true">${I[n]}</svg>`;
 const navIc = (n, v) => ic(S.view === v && I[n + "_f"] ? n + "_f" : n);
@@ -1719,7 +1723,8 @@ async function makeClips() {
 /* ============================================================ clips + jobs */
 function scoreCls(s) { return s >= 80 ? "s-hi" : s >= 60 ? "s-mid" : ""; }
 function postPills(c) {
-  return Object.values(c.posts || {}).filter(p => p.status !== "cancelled").map(p => {
+  const drv = c.drive?.url ? `<a class="pill ok" href="${esc(c.drive.url)}" target="_blank" rel="noopener" title="Saved on Google Drive">${ic("cloud")}Drive</a>` : "";
+  return drv + Object.values(c.posts || {}).filter(p => p.status !== "cancelled").map(p => {
     const cls = p.status === "posted" ? "ok" : p.status === "failed" ? "bad" : "warn";
     const txt = `${esc(p.account_name)} · ${p.status === "scheduled" ? clock(p.due_at) : p.status}`;
     return p.url ? `<a class="pill ${cls}" href="${esc(p.url)}" target="_blank" rel="noopener">${txt}</a>` : `<span class="pill ${cls}" title="${esc(p.error || "")}">${txt}</span>`;
@@ -1731,16 +1736,18 @@ function clipHtml(j, c) {
     : c.status === "error" ? `<span class="making" style="animation:none;color:var(--bad);background:var(--bad-soft)">Could not make this clip. Open it to try again.</span>`
     : `<span class="making">${c.status === "rendering" ? "Making this clip…" : "Waiting its turn…"}</span>`;
   const key = `c:${j.id}:${c.id}`, busyClip = c.status === "queued" || c.status === "rendering";
+  const pills = postPills(c), canArch = c.status === "done" && !c.drive && S.status?.gdrive?.connected;
   return `<article class="clip ${sel().has(key) ? "picked" : ""}">
     <button class="shot" data-act="openclip" ${a} aria-label="Open clip: ${esc(c.title || c.hook)}">${body}
       <span class="badge l ${scoreCls(c.score)}" title="AI score">${c.score || "Hand"}</span><span class="badge r">${fmt(c.end - c.start)}</span></button>
     <div class="clip-body">
       <div class="hook">${esc(c.hook || "Untitled clip")}</div>
       <div class="ttl">${esc(c.title)}</div>
-      ${postPills(c) ? `<div class="row" style="gap:4px">${postPills(c)}</div>` : ""}
+      ${pills ? `<div class="row" style="gap:4px">${pills}</div>` : ""}
       <div class="clip-foot">
         ${busyClip ? "" : `<label class="selck" title="Select this clip"><input type="checkbox" data-sel="${key}" ${sel().has(key) ? "checked" : ""} aria-label="Select this clip"></label>`}
         ${c.status === "done" ? `<a class="btn sm icon ghost" href="${m}${esc(c.file)}?download=1" title="Download" aria-label="Download">${ic("down")}</a>` : ""}
+        ${canArch ? `<button class="btn sm icon ghost" data-act="gdclip" ${a} title="Archive to Google Drive" aria-label="Archive to Google Drive">${ic("cloud")}</button>` : ""}
         <button class="btn sm icon ghost" data-act="copy" ${a} title="Copy post text" aria-label="Copy post text">${ic("copy")}</button>
         ${busyClip ? "" : `<button class="btn sm icon ghost" data-act="delclip" ${a} title="Delete this clip" aria-label="Delete this clip">${ic("trash")}</button>`}
         <span class="grow"></span>
@@ -2055,7 +2062,7 @@ const setTabs = () => [
   ...(S.status.accounts === false ? [] : [["profile", "Profile", "user", "Your name, email and how you sign in"],
                                           ["security", "Security", "lock", "Password and signing out"]]),
   ["apps", "Connected apps", "plug", "Where your clips get posted"],
-  ...(S.status.user?.is_admin ? [["storage", "Storage", "folder", "Where videos and clips are kept"]] : [])];
+  ["storage", "Storage", "folder", "Where videos and clips are kept"]];
 function aiHints(changed) {
   const k = S.ai, sel = $("#ai_provider"); if (!k || !sel) return;
   const pv = k.providers.find(x => x.id === sel.value) || k.providers[0], prof = k.saved_profiles?.[pv.id];
@@ -2253,10 +2260,14 @@ async function drawSettings() {
           <button class="btn danger" data-act="delaccount">${ic("trash")}Delete my account</button></section>`;
     }
     if (tab === "storage") {
-      const s = S.stor = await api("/api/storage");
-      const usedPct = s.total_gb ? Math.min(100, Math.max(1, 100 * (s.total_gb - s.free_gb) / s.total_gb)) : 0;
-      const gb = n => `${Number(n).toLocaleString(undefined, {maximumFractionDigits: 1})} GB`;
-      body.innerHTML = `<section class="set-sec"><h2>Storage</h2><p class="help">Everything PeakCut keeps is in one folder: your videos, clips, recordings, creators and settings. You can open it, back it up, or move it to a drive with more room.</p>
+      const admin = !!me?.is_admin;
+      const gb = n => `${Number(n || 0).toLocaleString(undefined, {maximumFractionDigits: 1})} GB`;
+      const fmtBytes = b => b >= 1e9 ? gb(b / 1e9) : b >= 1e6 ? `${Math.round(b / 1e6)} MB` : b > 0 ? `${Math.max(1, Math.round(b / 1e3))} KB` : "0 MB";
+      let localSec = "";
+      if (admin) {
+        const s = S.stor = await api("/api/storage");
+        const usedPct = s.total_gb ? Math.min(100, Math.max(1, 100 * (s.total_gb - s.free_gb) / s.total_gb)) : 0;
+        localSec = `<section class="set-sec"><h2>Storage</h2><p class="help">Everything PeakCut keeps is in one folder: your videos, clips, recordings, creators and settings. You can open it, back it up, or move it to a drive with more room.</p>
           ${s.full ? `<div class="note" style="margin:0 0 14px">${ic("warn")}<span><b>This drive is almost full, so PeakCut can't take new videos.</b> ${gb(s.free_gb)} free on ${esc(s.drive)}; it needs at least ${gb(s.min_free_gb)}. Free up space, or move the folder to another drive below.</span></div>` : ""}
           ${s.pending ? `<div class="note" style="margin:0 0 14px">${ic("clock")}<span><b>The folder changes to ${esc(s.pending)} the next time PeakCut starts.</b> Close PeakCut and start it again. <button class="btn sm ghost" data-act="storcancel">Undo</button></span></div>` : ""}
           <div class="stor-path"><code>${esc(s.path)}</code>${s.local ? `<button class="btn" data-act="storopen">${ic("folder")}Open folder</button>` : ""}</div>
@@ -2268,6 +2279,55 @@ async function drawSettings() {
                 <p class="sub">The change happens the next time PeakCut starts, so nothing is moved while a video is being made.</p>
                 <div class="row"><button class="btn primary" data-act="storsave">Use this folder</button><button class="btn ghost" data-act="storchange">Cancel</button></div></div>`
             : `<div class="row" style="margin-top:16px"><button class="btn" data-act="storchange">Change folder</button></div>`}</section>`;
+      }
+      const gd = S.gd = await api("/api/gdrive");
+      S.status.gdrive = {ready: gd.ready, connected: gd.connected, queued: gd.queued || 0};
+      const apps = admin && S.gdSetupOpen ? await api("/api/apps").catch(() => null) : null;
+      const gapp = apps?.youtube;
+      const ytRedirect = gapp?.redirect || String(gd.redirect || "").replace("/oauth/gdrive/callback", "/oauth/youtube/callback");
+      const gdAct = (!gd.ready
+          ? (admin ? `<button class="btn sm primary" type="button" data-act="gdappsetup">${ic("cog")}Set up</button>` : `<span class="pill">Not set up on this server</span>`)
+          : gd.connected
+            ? `<button class="btn sm" type="button" data-act="gddisconnect">Disconnect</button>`
+            : `<a class="btn sm primary" href="/oauth/gdrive/start">${ic("plus")}Connect Google Drive</a>`)
+        + (gd.ready && admin ? `<button class="btn sm ghost" type="button" data-act="gdappsetup" title="Change this server's Google app">${ic("cog")}</button>` : "");
+      const gdSetup = admin && S.gdSetupOpen ? `<div class="appsetup">
+          <p class="sub">PeakCut shares one Google Cloud app for Google Drive archiving and YouTube uploads. Register this server once at <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener">Google Cloud</a>:</p>
+          <ol>
+            <li>Create or select a project and turn on <b>Google Drive API</b> and <b>YouTube Data API v3</b>.</li>
+            <li>Create an <b>OAuth client ID</b> of type <b>Web application</b>.</li>
+            <li>Under <b>Authorised redirect URIs</b>, add both addresses below (<code>/oauth/gdrive/callback</code> and <code>/oauth/youtube/callback</code>):</li>
+            <li>Paste its Client ID and Client secret here.</li>
+          </ol>
+          <div class="copyrow"><code>${esc(gd.redirect)}</code><button class="btn sm" type="button" data-act="copytext" data-t="${esc(gd.redirect)}">${ic("copy")}Copy</button></div>
+          <div class="copyrow"><code>${esc(ytRedirect)}</code><button class="btn sm" type="button" data-act="copytext" data-t="${esc(ytRedirect)}">${ic("copy")}Copy</button></div>
+          <div class="fields">
+            <label class="f">${esc(gapp?.id_label || "Client ID")}<input id="gd_app_id" placeholder="${gapp?.ready ? "Saved: " + esc(gapp.id_hint) + ". Paste a new one to replace it" : ""}" autocomplete="off" spellcheck="false"></label>
+            <label class="f">${esc(gapp?.secret_label || "Client secret")}<input id="gd_app_secret" type="password" placeholder="${gapp?.ready ? "Saved. Paste a new one to replace it" : ""}" autocomplete="off"></label>
+          </div>
+          <p class="sub">While your Google app is in Testing mode, add your Google address under Audience / Test users in Google Cloud.</p>
+          <div class="row"><button class="btn primary" type="button" data-act="gdappsave">Save</button><button class="btn ghost" type="button" data-act="gdappsetup">Close</button></div></div>` : "";
+      const q = gd.quota, qPct = q?.limit_gb ? Math.min(100, Math.max(1, 100 * (q.used_gb || 0) / q.limit_gb)) : 0;
+      const qLow = !!(q?.limit_gb && q.free_gb != null && q.free_gb < 5);
+      const gdSec = `<section class="set-sec"><h2>Google Drive archive</h2>
+          <p class="help">Posted clips move to your Google Drive and free space on this computer automatically. Clips still in preparation or waiting in the post queue stay on this computer until every scheduled post goes out, and archived clips still play, download and re-post whenever you need them.</p>
+          ${gd.last_error ? `<div class="note" style="margin:0 0 14px">${ic("warn")}<span><b>Google Drive reported a problem:</b> ${esc(gd.last_error)}</span></div>` : ""}
+          <div class="appcard"><span class="applogo" style="background:var(--brand-soft);color:var(--brand-deep)">${ic("cloud")}</span>
+            <div class="apptx"><b>Google Drive</b><span>${gd.connected ? "Clips are organised in PeakCut / Creator / Month folders in your Drive." : "Connect your Google account to save finished clips in Drive."}</span>
+              ${gd.connected ? `<div class="row" style="margin-top:8px"><span class="pill ok">Connected</span> <b>${esc(gd.email || "Google Drive")}</b>${gd.queued ? `<span class="pill warn">${gd.queued} archiving…</span>` : ""}</div>` : ""}</div>
+            <div class="appact">${gdAct}</div>${gdSetup}</div>
+          ${gd.connected && q && q.limit_gb ? `<div class="stor-bar ${qLow ? "low" : ""}" role="img" aria-label="${Math.round(qPct)}% of Google Drive is used"><i style="width:${qPct}%"></i></div>
+            <div class="stor-nums"><span>Google Drive uses <b>${gb(q.used_gb)}</b></span><span><b>${gb(q.free_gb)}</b> free of ${gb(q.limit_gb)}</span></div>` : ""}
+          ${gd.connected ? `<div class="row" style="margin-top:14px;justify-content:space-between">
+              <span class="sub"><b>${(gd.archived_count || 0).toLocaleString()}</b> clip${gd.archived_count === 1 ? "" : "s"} archived · <b>${fmtBytes(gd.archived_bytes || 0)}</b> freed on this computer${gd.queued ? ` · <b>${gd.queued}</b> in queue` : ""}</span>
+              <button class="btn sm" type="button" data-act="gdsweep">${ic("cloud")}Archive eligible clips now</button></div>`
+            : gd.archived_count ? `<p class="sub" style="margin-top:12px"><b>${gd.archived_count.toLocaleString()}</b> clip${gd.archived_count === 1 ? "" : "s"} (${fmtBytes(gd.archived_bytes || 0)}) archived previously.</p>` : ""}
+          <div class="ai-form" style="margin-top:20px">
+            <label class="sw"><input type="checkbox" id="gd_after_post" ${gd.auto_after_post === false ? "" : "checked"}><span>Archive clips right after posting<small>Moves a clip to Google Drive as soon as all its scheduled posts finish.</small></span></label>
+            <label class="f" style="max-width:340px">Archive unposted clips and remove raw videos after (days)<input id="gd_days" type="number" min="0" max="365" step="1" value="${gd.auto_days ?? 3}"><span class="hint">Set to 0 to keep unposted clips on this computer until you archive them yourself.</span></label>
+            <div class="row"><button class="btn primary" type="button" data-act="gdsave">Save Drive settings</button></div>
+          </div></section>`;
+      body.innerHTML = localSec + gdSec;
     }
     if (tab === "apps") {
       const conn = S.accounts || [];
@@ -2328,6 +2388,15 @@ function drawClipDlg(full) {
   const j = jobOf(D.jid), c = j?.clips.find(x => x.id === D.cid), dlg = $("#clipdlg");
   if (!c) { if (dlg.open) dlg.close(); return; }
   const m = `/media/${j.id}/`, sig = c.status + c.version;
+  const rawGone = !!(c.drive && c.local === false && (j.kind === "live" || j.source?.type !== "url"));
+  const canArch = c.status === "done" && !c.drive && S.status?.gdrive?.connected;
+  const archNote = c.drive?.url ? `<p class="sub">${rawGone
+    ? "Archived on Google Drive. Its raw source video was removed to free disk space, so it cannot be re-made — playing, downloading and posting still work."
+    : "Archived on Google Drive. Playing, downloading and posting still work."}</p>` : "";
+  const footHtml = (c.status === "done" ? `<a class="btn" href="${m}${esc(c.file)}?download=1">${ic("down")}Download</a>` : "")
+    + (canArch ? `<button class="btn" data-act="gdclip" data-j="${j.id}" data-c="${esc(c.id)}">${ic("cloud")}Archive to Drive</button>` : "")
+    + (c.drive?.url ? `<a class="btn" href="${esc(c.drive.url)}" target="_blank" rel="noopener">${ic("upright")}Open in Drive</a>` : "")
+    + `<button class="btn" data-act="copy" data-j="${j.id}" data-c="${esc(c.id)}">${ic("copy")}Copy post text</button>`;
   const stage = c.status === "done" ? `<video src="${m}${esc(c.file)}?v=${c.version}" poster="${m}${esc(c.cover)}?v=${c.version}" controls autoplay playsinline></video>`
     : c.status === "error" ? `<div class="err" style="padding:20px;text-align:center">${esc(c.error || "Could not make this clip.")}</div>`
     : `<span class="making">${c.status === "rendering" ? "Making this clip…" : "Waiting its turn…"}</span>`;
@@ -2347,19 +2416,22 @@ function drawClipDlg(full) {
         <h3>Post text</h3>
         <label class="f">Title<input data-f="title" value="${esc(c.title)}"></label>
         <label class="f">Description<textarea data-f="description" rows="2">${esc(c.description)}</textarea></label>
-        <button class="btn" data-act="remake">${ic("scissors")}Save and re-make clip</button>
+        <button class="btn" data-act="remake" ${rawGone ? "disabled" : ""}>${ic("scissors")}Save and re-make clip</button>
+        <div id="darchnote"></div>
         <h3>Post it</h3>
         <div id="dposts" class="row" style="gap:4px"></div>
         ${S.accounts.length ? `<div class="row">${S.accounts.map(a => `<label class="ck"><input type="checkbox" data-pacc value="${esc(a.id)}">${esc(a.label)} · ${esc(a.name)}</label>`).join("")}</div>
           <div class="row"><button class="btn primary" data-act="postnow">${ic("send")}Post now</button><button class="btn" data-act="postqueue">Add to queue</button></div>`
           : `<p class="help">No accounts connected yet. Connect one in Settings.</p>`}
-        <div class="row" style="margin-top:auto;padding-top:8px;border-top:1px solid var(--line)">
-          ${c.status === "done" ? `<a class="btn" href="${m}${esc(c.file)}?download=1">${ic("down")}Download</a>` : ""}
-          <button class="btn" data-act="copy" data-j="${j.id}" data-c="${esc(c.id)}">${ic("copy")}Copy post text</button></div>
+        <div id="dfoot" class="row" style="margin-top:auto;padding-top:8px;border-top:1px solid var(--line)"></div>
       </div></div>`;
   } else if (D.sig !== sig) $("#stage").innerHTML = stage;
   D.sig = sig;
+  const rmBtn = $("#clipdlg [data-act=remake]");
+  if (rmBtn) rmBtn.disabled = rawGone;
+  put($("#darchnote"), archNote);
   put($("#dposts"), postPills(c));
+  put($("#dfoot"), footHtml);
 }
 $("#clipdlg").addEventListener("close", () => { $("#clipdlg").innerHTML = ""; D.jid = null; });
 $("#clipdlg").addEventListener("click", e => { if (e.target === e.currentTarget) e.currentTarget.close(); });
@@ -2385,6 +2457,7 @@ async function tick() {
     creators.forEach(c => { if (!c.channels) { const u = c.channel || "", k = /youtu/i.test(u) ? "youtube" : /twitch/i.test(u) ? "twitch" : /kick/i.test(u) ? "kick" : ""; c.channels = k ? {[k]: u} : {}; } });
     S.jobs = jobs; S.creators = creators; S.accounts = accounts;
     if (got.ai) S.status.ai = got.ai;
+    if (got.gdrive) S.status.gdrive = got.gdrive;
     if (got.unread != null) S.status.unread = got.unread;
     if (S.view === "overview") { S.overview = await api("/api/overview"); S.ovAt = Date.now(); }
     if (creatorId() && !creator()) return go("overview");
@@ -2795,6 +2868,51 @@ document.addEventListener("click", async e => {
       S.storOpen = false; toast("Saved. Close PeakCut and start it again to switch to the new folder.", "ok"); return drawSettings();
     }
     if (a === "storcancel") { await send("/api/storage", {cancel: true}, "PUT"); toast("Kept the current folder", "ok"); return drawSettings(); }
+    if (a === "gdappsetup") { S.gdSetupOpen = !S.gdSetupOpen; return drawSettings(); }
+    if (a === "gdappsave") {
+      b.disabled = true;
+      try {
+        await send("/api/apps", {platform: "youtube", client_id: $("#gd_app_id").value, client_secret: $("#gd_app_secret").value}, "PUT");
+        S.gdSetupOpen = false; S.status = await api("/api/status"); toast("Saved. You can connect Google Drive now.", "ok"); return drawSettings();
+      } finally { b.disabled = false; }
+    }
+    if (a === "gdsave") {
+      b.disabled = true;
+      try {
+        const raw = $("#gd_days").value.trim(), days = raw === "" ? 0 : Number(raw);
+        if (!Number.isFinite(days)) throw new Error("Choose a number of days between 0 and 365.");
+        const gd = await send("/api/gdrive", {auto_after_post: $("#gd_after_post").checked, auto_days: Math.round(days)}, "PUT");
+        S.gd = gd; S.status.gdrive = {ready: gd.ready, connected: gd.connected, queued: gd.queued || 0};
+        toast("Google Drive settings saved", "ok"); return drawSettings();
+      } finally { b.disabled = false; }
+    }
+    if (a === "gddisconnect") {
+      if (!await ask("Disconnect Google Drive?", "Clips already on Google Drive stay there, and new clips will stay on this computer until you connect again.", "Disconnect", true)) return;
+      await api("/api/gdrive", {method: "DELETE"});
+      S.status = await api("/api/status"); render(); toast("Google Drive disconnected", "ok"); return drawSettings();
+    }
+    if (a === "gdsweep") {
+      b.disabled = true;
+      try {
+        const r = await send("/api/gdrive/sweep");
+        if (r.gdrive) S.status.gdrive = {ready: r.gdrive.ready, connected: r.gdrive.connected, queued: r.gdrive.queued || 0};
+        const parts = [
+          r.queued ? `${r.queued} clip${r.queued === 1 ? "" : "s"} queued for Google Drive` : "",
+          r.cleaned ? `${r.cleaned} raw video${r.cleaned === 1 ? "" : "s"} cleaned up` : ""
+        ].filter(Boolean);
+        toast(parts.length ? parts.join(" · ") + "." : "Everything eligible is already archived.", "ok");
+        await tick(); return drawSettings();
+      } finally { b.disabled = false; }
+    }
+    if (a === "gdclip") {
+      b.disabled = true;
+      try {
+        await send(`/api/jobs/${encodeURIComponent(d.j)}/clips/${encodeURIComponent(d.c)}/archive`);
+        toast("Archiving clip to Google Drive…", "ok");
+        setTimeout(() => { if (b.isConnected) b.disabled = false; }, 2000);
+        return tick();
+      } catch (err) { b.disabled = false; throw err; }
+    }
     if (a === "appsetup") { S.setupOpen = d.p && S.setupOpen !== d.p ? d.p : ""; return drawSettings(); }
     if (a === "copytext") { await navigator.clipboard.writeText(d.t); return toast("Copied", "ok"); }
     if (a === "appsave") {
@@ -2847,6 +2965,11 @@ $("#main").addEventListener("scroll", () => $(".topbar").classList.toggle("stuck
     const ok = q.get("connected"), err = q.get("connect_error"), nm = q.get("name");
     history.replaceState(null, "", location.pathname);
     setTimeout(() => ok ? toast(`${nm || ok} is connected. Pick it in a creator's Setup to post there.`, "ok") : toast(err, "bad"), 300);
+  }
+  if (q.get("gdrive_connected") || q.get("gdrive_error")) {
+    const ok = q.get("gdrive_connected"), err = q.get("gdrive_error");
+    history.replaceState(null, "", location.pathname);
+    setTimeout(() => ok ? toast(`Google Drive${ok !== "1" ? " (" + ok + ")" : ""} is connected. Clips will archive there automatically.`, "ok") : toast(err, "bad"), 300);
   }
   if (q.get("verified")) { history.replaceState(null, "", location.pathname); setTimeout(() => toast("Email confirmed. You're ready to clip.", "ok"), 300); }
   if (q.get("verify_error")) { history.replaceState(null, "", location.pathname); setTimeout(() => toast(q.get("verify_error"), "bad"), 300); }
