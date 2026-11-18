@@ -455,6 +455,13 @@ img.av{object-fit:cover}
 .ai-chk-top code{font-size:12px;background:var(--muted);padding:2px 7px;border-radius:6px;color:var(--text)}
 .ai-chk-top .ms{margin-left:auto;font-size:12px;color:var(--faint);font-variant-numeric:tabular-nums}
 .ai-chk-err{font-size:12px;color:var(--bad)}
+.btn-spin{display:inline-block;width:13px;height:13px;border-radius:50%;border:2px solid currentColor;border-right-color:transparent;animation:spin .75s linear infinite;flex:none}
+.ai-prog{margin:10px 0 14px;max-width:560px;padding:12px 14px;border-radius:10px;background:var(--brand-soft);border:1px solid var(--brand);display:grid;gap:8px}
+.ai-prog-head{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:13px;font-weight:600;color:var(--brand-ink)}
+.ai-prog-head>span{display:inline-flex;align-items:center;gap:8px;min-width:0}
+.ai-prog-head b{font-variant-numeric:tabular-nums;color:var(--brand-deep);white-space:nowrap}
+.ai-prog .bar{margin:0;background:rgba(42,26,18,.12)}
+.ai-chk.testing{border-color:var(--brand);background:#FFFDFB}
 .set-sec{padding:0 0 26px;margin-bottom:26px;border-bottom:1px solid var(--line)}
 .set-sec:last-child{border-bottom:0}
 .set-sec h2{font-size:17px;color:var(--brand-ink);margin-bottom:4px}
@@ -1070,6 +1077,8 @@ const jobOf = id => S.jobs.find(j => j.id === id);
 /* ============================================================ shell */
 function aiStatePill(st, prefix) {
   const pre = prefix ? esc(prefix) + ": " : "";
+  if (st === "testing") return `<span class="pill brand"><i class="btn-spin"></i>${pre}Testing…</span>`;
+  if (st === "queued") return `<span class="pill">${pre}Queued</span>`;
   if (st === "operational") return `<span class="pill ok">${ic("check")}${pre}Operational</span>`;
   if (st === "error") return `<span class="pill bad">${ic("warn")}${pre}Failed</span>`;
   if (st === "untested") return `<span class="pill warn">${pre}Not tested yet</span>`;
@@ -2065,12 +2074,35 @@ function aiHints(changed) {
   $("#ai_fb_base").placeholder = fpv.address || "http://127.0.0.1:1234/v1";
   $("#ai_fb_basewrap").hidden = fpv.id !== "custom" && !$("#ai_fb_base").value;
 }
-function renderAiChecks(checks) {
-  if (!checks?.length) return `<p class="sub" style="margin:0 0 18px">No models configured yet. Choose your service, paste a key and press <b>Save and test all</b>.</p>`;
-  return `<div class="ai-checks">${checks.map(c => {
+function aiEffectiveChecks(k) {
+  if (k?.checks?.length) return k.checks.map(c => ({...c}));
+  const rows = [];
+  if (k?.provider && k.models?.length) {
+    k.models.forEach(m => rows.push({order: rows.length + 1, role: "primary", provider: k.provider, label: k.label || k.provider, model: m, ready: !!k.ready, state: k.ready ? "untested" : "incomplete", ms: null, at: null, error: ""}));
+  }
+  const fb = k?.fallback;
+  if (fb?.provider && fb.models?.length) {
+    fb.models.forEach(m => rows.push({order: rows.length + 1, role: "fallback", provider: fb.provider, label: fb.label || fb.provider, model: m, ready: !!fb.ready, state: fb.ready ? "untested" : "incomplete", ms: null, at: null, error: ""}));
+  }
+  return rows;
+}
+function renderAiProg(prog) {
+  if (!prog) return "";
+  return `<div class="ai-prog" role="status" aria-live="polite">
+    <div class="ai-prog-head"><span><i class="btn-spin"></i>${esc(prog.text)}</span><b>${esc(prog.right || "")}</b></div>
+    <div class="bar"><i style="width:${Math.max(6, Math.min(100, prog.pct || 0))}%"></i></div>
+  </div>`;
+}
+function renderAiChecks(checks, prog) {
+  const head = renderAiProg(prog);
+  if (!checks?.length) return head + `<p class="sub" style="margin:0 0 18px">No models configured yet. Choose your service, paste a key and press <b>Save and test all</b>.</p>`;
+  return head + `<div class="ai-checks">${checks.map(c => {
     const roleTag = c.role === "fallback" ? "Fallback" : "Main";
-    const meta = c.at ? `${c.ms != null ? c.ms + " ms · " : ""}${when(c.at)}` : (c.state === "untested" ? "Press Test to verify live connection" : "");
-    return `<div class="ai-chk">
+    const meta = c.state === "testing" ? (c.liveElapsed || "Waiting for response…")
+      : c.state === "queued" ? "Waiting in queue…"
+      : c.at ? `${c.ms != null ? c.ms + " ms · " : ""}${when(c.at)}`
+      : (c.state === "untested" ? "Press Test to verify live connection" : "");
+    return `<div class="ai-chk ${c.state === "testing" ? "testing" : ""}">
       <div class="ai-chk-top"><span class="pill">${c.order}. ${roleTag}</span><b>${esc(c.label)}</b><code>${esc(c.model)}</code>${aiStatePill(c.state)}<span class="ms">${esc(meta)}</span></div>
       ${c.error ? `<div class="ai-chk-err">${esc(c.error)}</div>` : ""}
     </div>`;
@@ -2086,9 +2118,10 @@ async function drawSettings() {
   try {
     if (tab === "ai") {
       const k = S.ai = await api("/api/ai"), fb = k.fallback || {};
+      k.checks = aiEffectiveChecks(k);
       const fbNote = fb.ready ? ` · Fallback: ${fb.label} (${fb.models?.[0] || ""})` : "";
       body.innerHTML = `<section class="set-sec"><h2>AI</h2><p class="help">PeakCut uses an AI model to pick the moments worth clipping and to write hooks, titles and captions. Use your own key from any of these services. You pay that service directly. Without a key, clips are picked by loudness.</p>
-          <div class="ai-state">${k.ready ? `${aiStatePill(k.main_state || "untested", "Main")}${fb.ready ? aiStatePill(k.fallback_state || "untested", "Fallback") : ""}<span class="sub">${esc(k.label)} · ${esc((k.models[0] || "") + fbNote)}</span>` : `<span class="pill warn">Not set up</span><span class="sub">Choose a service, paste your key and pick a model.</span>`}</div>
+          <div class="ai-state" id="ai_top_state">${k.ready ? `${aiStatePill(k.main_state || "untested", "Main")}${fb.ready ? aiStatePill(k.fallback_state || "untested", "Fallback") : ""}<span class="sub">${esc(k.label)} · ${esc((k.models[0] || "") + fbNote)}</span>` : `<span class="pill warn">Not set up</span><span class="sub">Choose a service, paste your key and pick a model.</span>`}</div>
           <div id="ai_health">${renderAiChecks(k.checks)}</div>
           <div class="ai-form">
             <label class="f">AI service<select id="ai_provider">${k.providers.map(x => `<option value="${esc(x.id)}" ${x.id === k.provider ? "selected" : ""}>${esc(x.label)}</option>`).join("")}</select></label>
@@ -2097,6 +2130,7 @@ async function drawSettings() {
             <label class="f">Model<span class="with"><input id="ai_model" list="ai_models" value="${esc(k.models.join(", "))}" spellcheck="false"><button class="btn" type="button" data-act="aimodels">Find models</button></span>
               <datalist id="ai_models"></datalist><span class="hint">A fast, inexpensive model is the right choice. Add a second one after a comma to fall back on.</span></label>
             <div class="row"><button class="btn" type="button" data-act="aitest" data-scope="primary">Test main connection</button></div>
+            <div id="ai_prog_primary"></div>
           </div>
           <div style="margin-top:26px;padding-top:22px;border-top:1px solid var(--line)">
             <h2>Fallback AI (optional)</h2>
@@ -2109,10 +2143,12 @@ async function drawSettings() {
                 <label class="f">Fallback model<span class="with"><input id="ai_fb_model" list="ai_fb_models" value="${esc((fb.models || []).join(", "))}" spellcheck="false"><button class="btn" type="button" data-act="aimodels" data-target="fb">Find models</button></span>
                   <datalist id="ai_fb_models"></datalist><span class="hint">Tried in order when the main AI service cannot answer.</span></label>
                 <div class="row"><button class="btn" type="button" data-act="aitest" data-scope="fallback">Test fallback connection</button></div>
+                <div id="ai_prog_fallback"></div>
               </div>
             </div>
           </div>
-          <div class="row" style="margin-top:22px"><button class="btn primary" data-act="aisave">Save and test all</button>${k.ready ? `<button class="btn" type="button" data-act="aitest" data-scope="all">Test all saved</button>` : ""}</div></section>`;
+          <div id="ai_prog_all" style="margin-top:14px"></div>
+          <div class="row" style="margin-top:16px"><button class="btn primary" data-act="aisave">Save and test all</button>${k.ready ? `<button class="btn" type="button" data-act="aitest" data-scope="all">Test all saved</button>` : ""}</div></section>`;
       aiHints();
     }
     if (tab === "profile") {
@@ -2343,7 +2379,9 @@ document.addEventListener("click", async e => {
   try {
     if (a === "go") { closePops(); return go(d.v, d.tab); }
     if (a === "aimodels") {
+      const origHtml = b.innerHTML;
       b.disabled = true;
+      b.innerHTML = `<i class="btn-spin"></i>Finding…`;
       const isFb = d.target === "fb";
       const prov = $(isFb ? "#ai_fb_provider" : "#ai_provider").value;
       const base = $(isFb ? "#ai_fb_base" : "#ai_base").value;
@@ -2353,43 +2391,109 @@ document.addEventListener("click", async e => {
         $(isFb ? "#ai_fb_models" : "#ai_models").innerHTML = r.models.map(m => `<option value="${esc(m)}">`).join("");
         toast(r.models.length ? `${r.models.length} models found. Click the model box to pick one.` : "The service listed no models. Type the model yourself.", r.models.length ? "ok" : "");
         if (r.models.length) $(isFb ? "#ai_fb_model" : "#ai_model").focus();
-      } finally { b.disabled = false; }
+      } finally { b.disabled = false; b.innerHTML = origHtml; }
       return;
     }
     if (a === "aisave" || a === "aitest") {
-      b.disabled = true;
+      const allBtns = $$('[data-act="aisave"],[data-act="aitest"],[data-act="aimodels"]');
+      const origBtn = b.innerHTML;
+      allBtns.forEach(x => { x.disabled = true; });
       const scope = a === "aisave" ? "all" : (d.scope || "all");
+      const localSlot = scope === "primary" ? $("#ai_prog_primary") : scope === "fallback" ? $("#ai_prog_fallback") : $("#ai_prog_all");
+      let timer = null;
+      const splitMs = s => (s || "").split(",").map(x => x.trim()).filter(Boolean).slice(0, 5);
+      const provLabel = id => S.ai?.providers?.find(x => x.id === id)?.label || id;
       try {
         if (a === "aisave") {
+          b.innerHTML = `<i class="btn-spin"></i>Saving settings…`;
+          if (localSlot) localSlot.innerHTML = renderAiProg({text: "Saving AI configuration…", right: "Step 0", pct: 8});
           const fbProv = $("#ai_fb_provider")?.value || "";
-          await send("/api/ai", {
+          S.ai = await send("/api/ai", {
             provider: $("#ai_provider").value, models: $("#ai_model").value, base_url: $("#ai_base").value, key: $("#ai_key").value,
             fallback_provider: fbProv, fallback_models: fbProv ? $("#ai_fb_model").value : "",
             fallback_base_url: fbProv ? $("#ai_fb_base").value : "", fallback_key: fbProv ? $("#ai_fb_key").value : ""
           }, "PUT");
+          if (S.ai) S.ai.checks = aiEffectiveChecks(S.ai);
         }
-        let draft = null;
-        if (a === "aitest" && scope === "primary") draft = {provider: $("#ai_provider").value, models: $("#ai_model").value, base_url: $("#ai_base").value, key: $("#ai_key").value};
-        if (a === "aitest" && scope === "fallback") draft = {provider: $("#ai_fb_provider").value, models: $("#ai_fb_model").value, base_url: $("#ai_fb_base").value, key: $("#ai_fb_key").value};
-        let res = null, why = "";
-        try { res = await send("/api/ai/test", {detailed: true, scope, draft}); } catch (err) { why = err.message; }
+        const steps = [];
+        if (scope === "primary" || scope === "all") {
+          const p = $("#ai_provider").value, ms = splitMs($("#ai_model").value), base = $("#ai_base").value, key = a === "aisave" ? "" : $("#ai_key").value;
+          if (!ms.length) throw new Error("Enter at least one model to test.");
+          ms.forEach(m => steps.push({role: "primary", provider: p, label: provLabel(p), model: m, base_url: base, key}));
+        }
+        if (scope === "fallback" || scope === "all") {
+          const fp = $("#ai_fb_provider")?.value || "";
+          if (fp) {
+            const fms = splitMs($("#ai_fb_model").value), fbase = $("#ai_fb_base").value, fkey = a === "aisave" ? "" : $("#ai_fb_key").value;
+            if (!fms.length) throw new Error("Enter at least one fallback model to test.");
+            fms.forEach(m => steps.push({role: "fallback", provider: fp, label: provLabel(fp), model: m, base_url: fbase, key: fkey}));
+          } else if (scope === "fallback") {
+            throw new Error("Choose a fallback AI service first.");
+          }
+        }
+        const other = (S.ai?.checks || []).filter(c => scope === "all" ? false : c.role !== scope);
+        const liveRows = (scope === "fallback"
+          ? [...other, ...steps.map(s => ({role: s.role, provider: s.provider, label: s.label, model: s.model, ready: true, state: "queued", ms: null, at: null, error: ""}))]
+          : [...steps.map(s => ({role: s.role, provider: s.provider, label: s.label, model: s.model, ready: true, state: "queued", ms: null, at: null, error: ""})), ...other]
+        ).map((r, idx) => ({...r, order: idx + 1}));
+
+        const results = [];
+        for (let i = 0; i < steps.length; i++) {
+          const stp = steps[i];
+          const rowIx = liveRows.findIndex(r => r.role === stp.role && r.provider === stp.provider && r.model === stp.model && (r.state === "queued" || r.state === "untested"));
+          if (rowIx >= 0) liveRows[rowIx].state = "testing";
+          const t0 = performance.now();
+          const paint = () => {
+            const sec = ((performance.now() - t0) / 1000).toFixed(1) + "s";
+            const pct = Math.round(((i + 0.35) / steps.length) * 100);
+            const prog = {text: `Testing model ${i + 1} of ${steps.length}: ${stp.label} · ${stp.model}`, right: `${i + 1}/${steps.length} · ${sec}`, pct};
+            if (rowIx >= 0) liveRows[rowIx].liveElapsed = `Testing… ${sec}`;
+            b.innerHTML = `<i class="btn-spin"></i>Testing ${i + 1}/${steps.length} (${sec})`;
+            if ($("#ai_health")) $("#ai_health").innerHTML = renderAiChecks(liveRows, prog);
+            if (localSlot) localSlot.innerHTML = renderAiProg(prog);
+          };
+          paint();
+          timer = setInterval(paint, 120);
+          let stepRes = null;
+          try {
+            const got = await send("/api/ai/test", {detailed: true, scope: stp.role, draft: {provider: stp.provider, models: stp.model, base_url: stp.base_url, key: stp.key}});
+            stepRes = got?.results?.[0] || {role: stp.role, provider: stp.provider, label: stp.label, model: stp.model, ok: !!got?.ok, state: got?.ok ? "operational" : "error", ms: Math.round(performance.now() - t0), at: Date.now() / 1000, error: got?.primary_error || got?.fallback_error || ""};
+          } catch (err) {
+            stepRes = {role: stp.role, provider: stp.provider, label: stp.label, model: stp.model, ok: false, state: "error", ms: Math.round(performance.now() - t0), at: Date.now() / 1000, error: err.message};
+          } finally {
+            clearInterval(timer); timer = null;
+          }
+          results.push(stepRes);
+          if (rowIx >= 0) liveRows[rowIx] = {...liveRows[rowIx], ...stepRes, ready: true, liveElapsed: ""};
+          const doneProg = {text: `Checked ${i + 1} of ${steps.length}: ${stp.model} (${stepRes.ok ? "Operational" : "Failed"})`, right: `${i + 1}/${steps.length}`, pct: Math.round(((i + 1) / steps.length) * 100)};
+          if ($("#ai_health")) $("#ai_health").innerHTML = renderAiChecks(liveRows, i + 1 < steps.length ? doneProg : null);
+          if (localSlot) localSlot.innerHTML = i + 1 < steps.length ? renderAiProg(doneProg) : "";
+        }
+
         S.status = await api("/api/status"); drawShell();
         if (a === "aisave" || scope === "all") await drawSettings();
-        else if (res && $("#ai_health")) {
-          const roleTested = scope === "fallback" ? "fallback" : "primary";
-          const other = (S.ai?.checks || []).filter(c => c.role !== roleTested);
-          const next = (roleTested === "primary" ? [...(res.results || []), ...other] : [...other, ...(res.results || [])])
-            .map((r, i) => ({...r, order: i + 1, ready: true}));
-          if (S.ai) S.ai.checks = next;
-          $("#ai_health").innerHTML = renderAiChecks(next);
+        else {
+          if (S.ai) S.ai.checks = liveRows;
+          if ($("#ai_health")) $("#ai_health").innerHTML = renderAiChecks(liveRows);
+          if ($("#ai_top_state") && S.status?.ai?.ready) {
+            const sa = S.status.ai;
+            const fbNote = sa.fallback_provider ? ` · Fallback: ${sa.fallback_provider} (${sa.fallback_model || ""})` : "";
+            $("#ai_top_state").innerHTML = `${aiStatePill(sa.main_state || "untested", "Main")}${sa.fallback_provider ? aiStatePill(sa.fallback_state || "untested", "Fallback") : ""}<span class="sub">${esc(sa.provider)} · ${esc((sa.model || "") + fbNote)}</span>`;
+          }
         }
-        const rs = res?.results || [], passed = rs.filter(x => x.ok).length;
+        const passed = results.filter(x => x.ok).length;
         const prefix = a === "aisave" ? "Saved. " : "";
-        if (!res) toast(`${prefix}Test failed: ${why}`, "bad");
-        else if (passed === rs.length && rs.length) toast(`${prefix}All ${passed} model${passed === 1 ? "" : "s"} operational (${rs.map(x => `${x.model} ${x.ms}ms`).join(", ")}).`, "ok");
-        else if (passed > 0) toast(`${prefix}${passed} of ${rs.length} models operational. Check Connection status for the failed one.`, "bad");
-        else toast(`${prefix}Connection test failed: ${rs[0]?.error || res.primary_error || res.fallback_error || "no response"}`, "bad");
-      } finally { b.disabled = false; }
+        if (passed === results.length && results.length) toast(`${prefix}All ${passed} model${passed === 1 ? "" : "s"} operational (${results.map(x => `${x.model} ${x.ms}ms`).join(", ")}).`, "ok");
+        else if (passed > 0) toast(`${prefix}${passed} of ${results.length} models operational. See red card for details.`, "bad");
+        else toast(`${prefix}Connection test failed: ${results[0]?.error || "no response"}`, "bad");
+      } catch (err) {
+        toast(`${a === "aisave" ? "Save failed: " : "Test failed: "}${err.message}`, "bad");
+      } finally {
+        if (timer) clearInterval(timer);
+        if (localSlot) localSlot.innerHTML = "";
+        allBtns.forEach(x => { x.disabled = false; });
+        if (document.body.contains(b)) b.innerHTML = origBtn;
+      }
       return;
     }
     if (a === "menu") return $("#app").classList.toggle("open");
