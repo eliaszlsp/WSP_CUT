@@ -359,48 +359,49 @@ def delete(jid):
 
 
 def request_render(jid, cid, changes: dict):
-    job = _jobs[jid]
-    clip = next(c for c in job["clips"] if c["id"] == cid)
-    new = dict(clip)
-    if "captions" in changes:
-        new.update(clean_options({"captions": changes["captions"]}))
-    if "output_lang" in changes:
-        new["output_lang"] = brain.clean_output_lang(changes["output_lang"])
-    for k in ("start", "end"):
-        if k in changes:
-            new[k] = round(float(changes[k]), 2)
-    if "src_offset" in clip:  # live clip: can only move inside the saved piece of stream
-        new["start"] = max(new["start"], clip["src_offset"])
-        new["end"] = min(new["end"], clip["src_end"])
-    if not (math.isfinite(new["start"]) and math.isfinite(new["end"])) or new["start"] < 0:
-        raise ValueError("Those times aren't valid.")
-    if not 3 <= new["end"] - new["start"] <= 180:
-        raise ValueError("A clip can be 3 to 180 seconds long.")
-    for k in ("hook", "title", "description", "style", "layout"):
-        if k in changes:
-            new[k] = str(changes[k])[:{"hook": 60, "title": 100, "description": 2000}.get(k, 20)]
-    if new.get("style") not in render.STYLES:
-        new["style"] = DEFAULTS["style"]
-    if new.get("layout") not in render.LAYOUTS:
-        new["layout"] = DEFAULTS["layout"]
-    has_clip_src = bool(clip.get("src") and Path(clip["src"]).is_file())
-    has_job_src = bool(job.get("source_path") and Path(job["source_path"]).is_file())
-    has_url_src = (
-        job.get("kind") != "live"
-        and (job.get("source") or {}).get("type") == "url"
-        and bool((job.get("source") or {}).get("url"))
-    )
-    was_cleaned = (
-        bool(clip.get("drive"))
-        or any(c.get("drive") for c in job.get("clips", []))
-        or (job.get("source_path") == "" and "source_path" in job)
-    )
-    if was_cleaned and not (has_clip_src or has_job_src or has_url_src):
-        raise ValueError(
-            "This clip was archived to Google Drive and its raw video was removed to save disk space, so it cannot be re-made."
+    with _lock:
+        job = _jobs[jid]
+        clip = next(c for c in job["clips"] if c["id"] == cid)
+        new = dict(clip)
+        if "captions" in changes:
+            new.update(clean_options({"captions": changes["captions"]}))
+        if "output_lang" in changes:
+            new["output_lang"] = brain.clean_output_lang(changes["output_lang"])
+        for k in ("start", "end"):
+            if k in changes:
+                new[k] = round(float(changes[k]), 2)
+        if "src_offset" in clip:  # live clip: can only move inside the saved piece of stream
+            new["start"] = max(new["start"], clip["src_offset"])
+            new["end"] = min(new["end"], clip["src_end"])
+        if not (math.isfinite(new["start"]) and math.isfinite(new["end"])) or new["start"] < 0:
+            raise ValueError("Those times aren't valid.")
+        if not 3 <= new["end"] - new["start"] <= 180:
+            raise ValueError("A clip can be 3 to 180 seconds long.")
+        for k in ("hook", "title", "description", "style", "layout"):
+            if k in changes:
+                new[k] = str(changes[k])[:{"hook": 60, "title": 100, "description": 2000}.get(k, 20)]
+        if new.get("style") not in render.STYLES:
+            new["style"] = DEFAULTS["style"]
+        if new.get("layout") not in render.LAYOUTS:
+            new["layout"] = DEFAULTS["layout"]
+        has_clip_src = bool(clip.get("src") and Path(clip["src"]).is_file())
+        has_job_src = bool(job.get("source_path") and Path(job["source_path"]).is_file())
+        has_url_src = (
+            job.get("kind") != "live"
+            and (job.get("source") or {}).get("type") == "url"
+            and bool((job.get("source") or {}).get("url"))
         )
-    clip.update(new, status="queued")
-    save(job)
+        was_cleaned = (
+            bool(clip.get("drive"))
+            or any(c.get("drive") for c in job.get("clips", []))
+            or (job.get("source_path") == "" and "source_path" in job)
+        )
+        if was_cleaned and not (has_clip_src or has_job_src or has_url_src):
+            raise ValueError(
+                "This clip was archived to Google Drive and its raw video was removed to save disk space, so it cannot be re-made."
+            )
+        clip.update(new, status="queued")
+        save(job)
     _q.put(("clip", jid, cid))
 
 
@@ -409,11 +410,18 @@ def render_one(job, clip, words):
     clip["status"] = "rendering"
     save(job)
     try:
-        if not clip.get("src") and not job.get("source_path"):
+        has_clip_src = bool(clip.get("src") and Path(clip["src"]).is_file())
+        has_job_src = bool(job.get("source_path") and Path(job["source_path"]).is_file())
+        if not has_clip_src and not has_job_src and (
+            (not clip.get("src") and not job.get("source_path"))
+            or (job.get("source") or {}).get("type") == "url"
+        ):
             _piece_again(job, clip)
-        off = clip.get("src_offset", 0.0)
-        src = Path(clip["src"]) if clip.get("src") else Path(job["source_path"])
-        if not clip.get("src"):
+            has_clip_src = bool(clip.get("src") and Path(clip["src"]).is_file())
+        use_clip_src = has_clip_src or bool(clip.get("src") and not has_job_src)
+        off = clip.get("src_offset", 0.0) if use_clip_src else 0.0
+        src = Path(clip["src"]) if use_clip_src else Path(job["source_path"])
+        if not use_clip_src:
             clip["end"] = min(clip["end"], job["duration"])
         local = dict(clip, start=clip["start"] - off, end=clip["end"] - off, hook=roman.to_roman(clip.get("hook") or ""))
         near = _caption_words(job, clip, words, off) if clip.get("captions", True) else []

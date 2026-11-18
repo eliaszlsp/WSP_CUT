@@ -184,16 +184,16 @@ def _purge_user_cache(uid: str):
 
 def forget(uid: str):
     """Remove all in-memory state, pending OAuth tokens, queue entries and cached clips for a deleted user."""
-    with _queue.mutex:
-        kept = [it for it in _queue.queue if it[0] != uid]
-        removed_q = len(_queue.queue) - len(kept)
-        if removed_q:
-            _queue.queue.clear()
-            _queue.queue.extend(kept)
-            _queue.unfinished_tasks = max(0, _queue.unfinished_tasks - removed_q)
-            if _queue.unfinished_tasks == 0:
-                _queue.all_tasks_done.notify_all()
     with _lock:
+        with _queue.mutex:
+            kept = [it for it in _queue.queue if it[0] != uid]
+            removed_q = len(_queue.queue) - len(kept)
+            if removed_q:
+                _queue.queue.clear()
+                _queue.queue.extend(kept)
+                _queue.unfinished_tasks = max(0, _queue.unfinished_tasks - removed_q)
+                if _queue.unfinished_tasks == 0:
+                    _queue.all_tasks_done.notify_all()
         _mem.pop(uid, None)
         for k in [k for k, v in list(_states.items()) if v[0] == uid]:
             _states.pop(k, None)
@@ -205,6 +205,11 @@ def forget(uid: str):
             _attempts.pop(k, None)
         for k in [k for k in list(_exhausted) if k[0] == uid]:
             _exhausted.discard(k)
+        if uid:
+            try:
+                (config.user_dir(uid) / "accounts" / "gdrive.json").unlink(missing_ok=True)
+            except OSError:
+                pass
     _purge_user_cache(uid)
 
 
@@ -873,10 +878,14 @@ def enqueue_clip(uid: str, jid: str, cid: str, manual: bool = False) -> bool:
 
 
 def on_clip_posted(uid: str, jid: str, cid: str) -> bool:
-    if not uid:
+    if not (uid and jid and cid):
         return False
+    key = (uid, jid, cid)
     with ctx.as_user(uid):
-        cfg = _cfg()
+        with _lock:
+            if key in _retries or key in _exhausted:
+                return False
+            cfg = _cfg()
         if cfg["connected"] and cfg["refresh_token"] and cfg["auto_after_post"]:
             return enqueue_clip(uid, jid, cid, manual=False)
     return False
@@ -909,57 +918,57 @@ def clean_job_source(job: dict, now: float = None, auto_days: int = 0) -> bool:
     from . import jobs, storage
     if not isinstance(job, dict) or not job.get("dir"):
         return False
-    live_job = jobs._jobs.get(job.get("id")) if job.get("id") else None
-    target = live_job if isinstance(live_job, dict) else job
-    if target.get("status") != "done":
-        return False
-    clips = target.get("clips") or []
-    if any(c.get("status") in ("queued", "rendering") for c in clips):
-        return False
-
-    t_now = time.time() if now is None else float(now)
-    valid = [c for c in clips if c.get("status") != "error"]
-    eligible = (
-        (bool(valid) and all(c.get("status") == "done" and c.get("drive") for c in valid))
-        or (not valid and auto_days > 0 and (t_now - float(target.get("created") or 0)) >= auto_days * 86400)
-    )
-    if not eligible:
-        return False
-
-    sp1 = target.get("source_path") or ""
-    src_obj = target.get("source") if isinstance(target.get("source"), dict) else None
-    sp2 = (src_obj.get("path") if src_obj else "") or ""
-    if not sp1 and not sp2:
-        return False
-
-    jdir_res = Path(target["dir"]).resolve()
-    freed = False
-    still_locked = set()
-    seen = set()
-    for raw_p in (sp1, sp2):
-        if not raw_p:
-            continue
-        s = str(raw_p)
-        if s in seen:
-            continue
-        seen.add(s)
-        p = Path(s)
-        try:
-            inside = p.resolve().parent == jdir_res
-        except OSError:
-            inside = False
-        if inside and p.is_file() and p.name not in ("job.json", "words.json"):
-            try:
-                sz = p.stat().st_size
-                p.unlink()
-                if sz > 0:
-                    freed = True
-            except OSError:
-                pass
-            if p.exists():
-                still_locked.add(s)
-
     with jobs._lock:
+        live_job = jobs._jobs.get(job.get("id")) if job.get("id") else None
+        target = live_job if isinstance(live_job, dict) else job
+        if target.get("status") != "done":
+            return False
+        clips = target.get("clips") or []
+        if any(c.get("status") in ("queued", "rendering") for c in clips):
+            return False
+
+        t_now = time.time() if now is None else float(now)
+        valid = [c for c in clips if c.get("status") != "error"]
+        eligible = (
+            (bool(valid) and all(c.get("status") == "done" and c.get("drive") for c in valid))
+            or (not valid and auto_days > 0 and (t_now - float(target.get("created") or 0)) >= auto_days * 86400)
+        )
+        if not eligible:
+            return False
+
+        sp1 = target.get("source_path") or ""
+        src_obj = target.get("source") if isinstance(target.get("source"), dict) else None
+        sp2 = (src_obj.get("path") if src_obj else "") or ""
+        if not sp1 and not sp2:
+            return False
+
+        jdir_res = Path(target["dir"]).resolve()
+        freed = False
+        still_locked = set()
+        seen = set()
+        for raw_p in (sp1, sp2):
+            if not raw_p:
+                continue
+            s = str(raw_p)
+            if s in seen:
+                continue
+            seen.add(s)
+            p = Path(s)
+            try:
+                inside = p.resolve().parent == jdir_res
+            except OSError:
+                inside = False
+            if inside and p.is_file() and p.name not in ("job.json", "words.json"):
+                try:
+                    sz = p.stat().st_size
+                    p.unlink()
+                    if sz > 0:
+                        freed = True
+                except OSError:
+                    pass
+                if p.exists():
+                    still_locked.add(s)
+
         changed = False
         if sp1 and str(sp1) not in still_locked and target.get("source_path"):
             target["source_path"] = ""
@@ -974,7 +983,7 @@ def clean_job_source(job: dict, now: float = None, auto_days: int = 0) -> bool:
         if changed or freed:
             jobs.save(target)
             storage._used["at"] = 0
-    return freed
+        return freed
 
 
 def archive_one(uid: str, jid: str, cid: str, manual: bool = False) -> str:
@@ -1095,6 +1104,9 @@ def archive_one(uid: str, jid: str, cid: str, manual: bool = False) -> str:
                     with jobs._lock:
                         if clip in job.get("clips", []):
                             clip.pop("src", None)
+                            if job.get("kind") != "live":
+                                clip.pop("src_offset", None)
+                                clip.pop("src_end", None)
                             jobs.save(job)
 
             clips_dir = jdir / "clips"
@@ -1133,7 +1145,7 @@ def archive_one(uid: str, jid: str, cid: str, manual: bool = False) -> str:
 
 
 def sweep_user(uid: str, now: float = None, force: bool = False) -> dict:
-    from . import jobs, posting
+    from . import jobs, posting, storage
     if not uid:
         return {"queued": 0, "cleaned": 0}
     with ctx.as_user(uid):
@@ -1144,6 +1156,7 @@ def sweep_user(uid: str, now: float = None, force: bool = False) -> dict:
         days = int(cfg["auto_days"])
         queued = 0
         cleaned = 0
+        unlinked_leftover = False
 
         with _lock:
             due_retries = [
@@ -1160,7 +1173,28 @@ def sweep_user(uid: str, now: float = None, force: bool = False) -> dict:
             jdir = Path(j["dir"]) if j.get("dir") else None
             for c in j.get("clips", []):
                 cid = c.get("id") or ""
-                if not cid or c.get("status") != "done" or c.get("drive"):
+                if not cid or c.get("status") != "done":
+                    continue
+                if c.get("drive"):
+                    if jdir and not posting.has_open_posts(jid, cid):
+                        clips_dir = jdir / "clips"
+                        fname_d = Path(str(c.get("file") or "")).name
+                        if fname_d:
+                            leftover_mp4 = clips_dir / fname_d
+                            if leftover_mp4.is_file():
+                                try:
+                                    leftover_mp4.unlink()
+                                    unlinked_leftover = True
+                                except OSError:
+                                    pass
+                        if clips_dir.is_dir():
+                            for extra in list(clips_dir.glob(f"{cid}.src*")):
+                                if extra.is_file():
+                                    try:
+                                        extra.unlink()
+                                        unlinked_leftover = True
+                                    except OSError:
+                                        pass
                     continue
                 if not force:
                     with _lock:
@@ -1185,6 +1219,10 @@ def sweep_user(uid: str, now: float = None, force: bool = False) -> dict:
                         queued += 1
             if clean_job_source(j, now=now_ts, auto_days=days):
                 cleaned += 1
+
+        if unlinked_leftover:
+            storage._used["at"] = 0
+            ctx.bump(uid)
 
         return {"queued": queued, "cleaned": cleaned}
 

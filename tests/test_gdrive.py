@@ -1313,6 +1313,138 @@ try:
                gdrive.queued_for_me() == 0),
               (True, True, True))
 
+    # ---- 17. Code Quality Review fixes: Instagram HTTPS archived clip_link, URL piece bounds reset, on_clip_posted exhausted guard, and Windows .mp4 unlink retry
+    with ctx.as_user(alice.id):
+        # 17a. Re-posting an archived clip to Instagram on HTTPS must sign clip["file"] ("clip01.mp4"), NOT "{uid}_{did}.mp4"
+        accounts._put({
+            "id": "ig_1", "platform": "instagram", "name": "@progamer", "added": time.time(),
+            "user_id": "17841", "token": "ig-tok-valid", "token_time": time.time(),
+        })
+        ig_captured = {}
+        orig_acc_post = accounts.httpx.post
+        orig_acc_get = accounts.httpx.get
+
+        def fake_ig_post(url, data=None, json=None, headers=None, timeout=None, content=None):
+            if url.endswith("/17841/media"):
+                ig_captured["video_url"] = (data or {}).get("video_url", "")
+                return FakeResp(200, {"id": "ig_container_99"})
+            if url.endswith("/17841/media_publish"):
+                return FakeResp(200, {"id": "ig_media_99"})
+            return FakeResp(404, {})
+
+        def fake_ig_get(url, params=None, headers=None, timeout=None):
+            if url.endswith("/ig_container_99"):
+                return FakeResp(200, {"status_code": "FINISHED"})
+            if url.endswith("/ig_media_99"):
+                return FakeResp(200, {"permalink": "https://www.instagram.com/reel/xyz99/"})
+            return FakeResp(404, {})
+
+        accounts.httpx.post = fake_ig_post
+        accounts.httpx.get = fake_ig_get
+        try:
+            gdrive._purge_user_cache(alice.id)
+            p_ig = posting.enqueue(jobs.get(j_multi["id"]), jobs.get(j_multi["id"])["clips"][0], ["ig_1"], now=True)
+            p_ig[0]["status"] = "posting"
+            posting._post(p_ig[0])
+        finally:
+            accounts.httpx.post = orig_acc_post
+            accounts.httpx.get = orig_acc_get
+
+        ig_vurl = ig_captured.get("video_url", "")
+        ig_token = urlparse(ig_vurl).path.removeprefix("/pub/").removesuffix(".mp4") if "/pub/" in ig_vurl else ""
+        ig_decoded = accounts.read_clip_link(ig_token) if ig_token else None
+        check("Instagram HTTPS re-post of archived clip signs clip01.mp4 in clip_link",
+              (p_ig[0]["status"], ig_decoded),
+              ("posted", (alice.id, j_multi["id"], "clip01.mp4")))
+
+        # 17b. Archived long-URL video clip with src_offset/src_end pops piece bounds so request_render can widen start/end
+        j_long_url = jobs.create({"type": "url", "url": "https://www.youtube.com/watch?v=longvod123", "name": "Long VOD"}, {}, enqueue=False, kind="video")
+        jlu_clips = Path(j_long_url["dir"]) / "clips"
+        jlu_clips.mkdir(parents=True, exist_ok=True)
+        (jlu_clips / "clip01.mp4").write_bytes(b"LONG_URL_MP4" * 100)
+        jlu_piece = jlu_clips / "clip01.src.mp4"
+        jlu_piece.write_bytes(b"LONG_URL_PIECE" * 100)
+        j_long_url["width"], j_long_url["height"], j_long_url["duration"] = 1920, 1080, 3600.0
+        j_long_url["clips"].append({
+            "id": "clip01", "status": "done", "file": "clip01.mp4", "title": "Long VOD Clip",
+            "hook": "WIDE", "description": "", "hashtags": [], "score": 90,
+            "start": 105.0, "end": 125.0,
+            "src": str(jlu_piece), "src_offset": 100.0, "src_end": 130.0,
+            "version": 1,
+        })
+        j_long_url["status"] = "done"
+        jobs.save(j_long_url)
+
+        check("long-URL video clip archives cleanly",
+              gdrive.archive_one(alice.id, j_long_url["id"], "clip01", manual=True), "archived")
+        c_lu = jobs.get(j_long_url["id"])["clips"][0]
+        check("archive_one pops src_offset and src_end on non-live video clips",
+              ("src" not in c_lu, "src_offset" not in c_lu, "src_end" not in c_lu),
+              (True, True, True))
+
+        orig_q_put2 = jobs._q.put
+        jobs._q.put = lambda *a, **k: None
+        try:
+            jobs.request_render(j_long_url["id"], "clip01", {"start": 80.0, "end": 150.0})
+        finally:
+            jobs._q.put = orig_q_put2
+        c_lu_widened = jobs.get(j_long_url["id"])["clips"][0]
+        check("archived URL clip can widen start/end beyond deleted piece's former bounds",
+              (c_lu_widened["start"], c_lu_widened["end"]),
+              (80.0, 150.0))
+
+        # 17c. on_clip_posted skips clips in _exhausted or _retries
+        gdrive._exhausted.add((alice.id, j_long_url["id"], "clip01"))
+        check("on_clip_posted skips clip marked in _exhausted",
+              gdrive.on_clip_posted(alice.id, j_long_url["id"], "clip01"), False)
+        gdrive._exhausted.discard((alice.id, j_long_url["id"], "clip01"))
+
+        # 17d. Windows PermissionError on clip01.mp4 during archive_one is cleaned up by subsequent sweep_user()
+        j_mp4_lock = jobs.create({"type": "file", "path": "", "name": "winmp4.mp4"}, {}, enqueue=False)
+        jml_clips = Path(j_mp4_lock["dir"]) / "clips"
+        jml_clips.mkdir(parents=True, exist_ok=True)
+        locked_clip_mp4 = jml_clips / "clip01.mp4"
+        locked_clip_mp4.write_bytes(b"WIN_LOCKED_CLIP_MP4" * 100)
+        j_mp4_lock["clips"].append({
+            "id": "clip01", "status": "done", "file": "clip01.mp4", "title": "Playing In Browser",
+            "start": 0.0, "end": 10.0, "version": 1,
+        })
+        j_mp4_lock["status"] = "done"
+        jobs.save(j_mp4_lock)
+
+        orig_unlink_2 = Path.unlink
+
+        def lock_clip_mp4_unlink(self, missing_ok=False):
+            if self.resolve() == locked_clip_mp4.resolve():
+                raise PermissionError("WinError 32: clip01.mp4 is open in video player")
+            return orig_unlink_2(self, missing_ok=missing_ok)
+
+        Path.unlink = lock_clip_mp4_unlink
+        try:
+            res_mp4_lk = gdrive.archive_one(alice.id, j_mp4_lock["id"], "clip01", manual=True)
+        finally:
+            Path.unlink = orig_unlink_2
+
+        check("archive_one succeeds even when Windows holds open handle on clip01.mp4",
+              (res_mp4_lk, bool(jobs.get(j_mp4_lock["id"])["clips"][0].get("drive")), locked_clip_mp4.is_file()),
+              ("archived", True, True))
+
+        storage._used["at"] = time.time()
+        v_before_sw = ctx.version(alice.id)
+        gdrive.sweep_user(alice.id, now=time.time(), force=False)
+        check("sweep_user cleans up leftover local clip01.mp4 of already-archived clip once unlocked",
+              (not locked_clip_mp4.exists(), storage._used["at"] == 0, ctx.version(alice.id) > v_before_sw),
+              (True, True, True))
+
+    # 17e. forget(uid) unlinks gdrive.json even before user_dir removal
+    fg_user, _ = auth._create("fgjson@example.com", "fgjson", password_hash="x")
+    with ctx.as_user(fg_user.id):
+        gdrive.save_settings({"auto_days": 9})
+    fg_json = config.user_dir(fg_user.id) / "accounts" / "gdrive.json"
+    check("gdrive.json exists before forget(uid)", fg_json.is_file(), True)
+    gdrive.forget(fg_user.id)
+    check("forget(uid) unlinks gdrive.json", not fg_json.exists(), True)
+
     print("ALL PASSED" if not fails else f"{len(fails)} failed")
 finally:
     db.engine.dispose()

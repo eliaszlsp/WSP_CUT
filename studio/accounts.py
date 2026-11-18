@@ -410,14 +410,14 @@ def _ig_token(acc) -> str:
     return acc["token"]
 
 
-def instagram_upload(acc, path: Path, caption: str, job_id: str = ""):
+def instagram_upload(acc, path: Path, caption: str, job_id: str = "", clip_name: str = ""):
     """A Reel. On a public site Instagram fetches the clip from a one-hour signed link; on a computer it cannot
     reach, the file is sent instead (only possible for some app types)."""
     token = _ig_token(acc)
     auth = {"Authorization": f"Bearer {token}"}
     uid = acc["user_id"]
     if config.PUBLIC_URL.startswith("https://") and job_id:
-        box = _check(httpx.post(f"{IG}/{uid}/media", data={"media_type": "REELS", "video_url": clip_link(job_id, path.name),
+        box = _check(httpx.post(f"{IG}/{uid}/media", data={"media_type": "REELS", "video_url": clip_link(job_id, clip_name or path.name),
                                                            "caption": caption[:2200], "share_to_feed": "true"},
                                 headers=auth, timeout=60), "Starting the Instagram post").json()
     else:
