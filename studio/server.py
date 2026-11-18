@@ -1252,7 +1252,7 @@ def ai_usage():
 # ---------------------------------------------------------------- the AI key and model, set from the dashboard
 # Only the owner (or an admin, when accounts are on) reaches these. The key is never sent back to the page.
 def _ai_error(e) -> str:
-    return safe.friendly(e, 300).replace(ai.key() or "\0", "<key>")
+    return ai.redact(safe.friendly(e, 300))
 
 
 @app.get("/api/ai")
@@ -1265,9 +1265,17 @@ def ai_get(request: Request):
 def ai_put(request: Request, body: dict = Body(...)):
     _admin(request)
     k = body.get("key")
+    fk = body.get("fallback_key")
+    has_fb = "fallback_provider" in body
     try:
-        out = ai.save(body.get("provider"), body.get("models"), body.get("base_url") or "",
-                      None if k is None or (isinstance(k, str) and not k.strip() and not body.get("remove_key")) else str(k))
+        out = ai.save(
+            body.get("provider"), body.get("models"), body.get("base_url") or "",
+            None if k is None or (isinstance(k, str) and not k.strip() and not body.get("remove_key")) else str(k),
+            fallback_provider=body.get("fallback_provider") if has_fb else None,
+            fallback_models=body.get("fallback_models") if has_fb else None,
+            fallback_address=(body.get("fallback_base_url") or "") if has_fb and "fallback_base_url" in body else None,
+            fallback_key=None if fk is None or (isinstance(fk, str) and not fk.strip() and not body.get("remove_fallback_key")) else str(fk),
+        )
     except (ValueError, TypeError) as e:
         raise HTTPException(400, str(e))
     usage.forget_all()

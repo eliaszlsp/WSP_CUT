@@ -185,6 +185,42 @@ check("clearing fallback leaves saved profile intact",
       not pub_off["fallback"]["ready"] and ai.targets() == [("gemini", "gemini-2.5-flash")]
       and pub_off["saved_profiles"]["openrouter"]["has_key"] is True)
 
+# ---- brain.ask_ai cascading across primary (429) -> fallback (200) and multi-key error redaction
+brain.time.sleep = lambda _s: None
+ai.save("gemini", "gemini-2.5-flash", "", "gem-secret-key-1111",
+        fallback_provider="openrouter", fallback_models="openrouter/free", fallback_key=None)
+seen.clear()
+
+
+def fake_cascade(url, json=None, headers=None, timeout=None, **_k):  # noqa: A002
+    seen.append((url, headers or {}))
+    if "generativelanguage" in url:
+        return Reply(429, {"error": {"message": "Resource exhausted gem-secret-key-1111"}})
+    return Reply(200, {"choices": [{"message": {"content": globals()["json_text"]({"items": [CLIP]})}}],
+                       "usage": {"prompt_tokens": 40, "completion_tokens": 15}})
+
+
+ai.httpx.post = fake_cascade
+with ctx.as_user(u1.id):
+    usage.set_context(None, "Fallback video")
+    import numpy as np
+    clips_fb, info_fb = brain.find_clips(words, np.zeros(60), 60.0, title="T2", uploader="U2")
+    check("brain.find_clips falls back from Gemini 429 to OpenRouter",
+          len(clips_fb) == 1 and clips_fb[0]["hook"] == "WOW" and info_fb["tokens"] == 55
+          and "openrouter/free" in str(info_fb["model"]) and ai.problem["text"] == "",
+          str((clips_fb, info_fb, ai.problem)))
+
+ai.httpx.post = lambda url, json=None, headers=None, timeout=None, **_k: (  # noqa: A002
+    Reply(429, {"error": {"message": "quota gem-secret-key-1111"}}) if "generativelanguage" in url else
+    Reply(401, {"error": {"message": "invalid key or-secret-key-9999"}})
+)
+with ctx.as_user(u1.id):
+    check("both providers failing raises RuntimeError",
+          _raises(RuntimeError, lambda: brain.ask_ai("hi", brain.SCHEMA, "Fail test")))
+    check("problem names fallback failure and hides both keys",
+          "OpenRouter" in ai.problem["text"] and "or-secret-key-9999" not in ai.problem["text"]
+          and "gem-secret-key-1111" not in ai.problem["text"], ai.problem["text"])
+
 print("ALL PASSED" if not fails else f"{len(fails)} failed")
 import shutil  # noqa: E402
 db.engine.dispose()

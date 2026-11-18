@@ -181,26 +181,30 @@ def loud_zscore(db):
 
 
 def ask_ai(prompt, schema=None, purpose="AI call", timeout=None):
-    """Try each model in order, with a couple of retries for rate limits and overloads.
-    Returns (the answer, the model that gave it, tokens used) and notes the tokens in the usage record."""
-    if not config.ai_ready():
+    """Try each configured target (primary models, then fallback service models) in order, with retries for rate
+    limits and overloads. Returns (the answer, the model that gave it, tokens used) and records token usage."""
+    ts = ai.targets()
+    if not ts:
         raise RuntimeError("The AI is not set up on this server.")
-    last = None
-    for model in ai.models():
-        for attempt in range(3):
+    prim = ai.provider()
+    last, last_prov, last_model = None, None, None
+    for i, (prov, model) in enumerate(ts):
+        tries = 2 if len(ts) > 1 and i < len(ts) - 1 else 3
+        for attempt in range(tries):
             try:
-                out, sent, wrote = ai.call(model, prompt, schema or SCHEMA, timeout)
+                out, sent, wrote = ai.call(model, prompt, schema or SCHEMA, timeout, provider_id=prov)
                 usage.record(sent, wrote, purpose)
                 ai.clear_problem()
-                return out, model, sent + wrote
+                used = model if prov == prim else f"{prov}:{model}"
+                return out, used, sent + wrote
             except Exception as e:  # noqa: BLE001
-                last = e
-                if "HTTP 429" in str(e) or "HTTP 5" in str(e):
-                    time.sleep(4 * (attempt + 1))
+                last, last_prov, last_model = e, prov, model
+                if ("HTTP 429" in str(e) or "HTTP 5" in str(e)) and attempt + 1 < tries:
+                    time.sleep(min(4 * (attempt + 1), 6) if timeout else 4 * (attempt + 1))
                     continue
                 break
-    ai.note_problem(last)
-    raise RuntimeError(f"The AI did not answer: {ai.explain(last) or last}")
+    ai.note_problem(last, provider_id=last_prov, model=last_model)
+    raise RuntimeError(f"The AI did not answer: {ai.explain(last, provider_id=last_prov, model=last_model) or ai.redact(last)}")
 
 
 def sentence_ends(words) -> list:

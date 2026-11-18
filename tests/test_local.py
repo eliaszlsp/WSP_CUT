@@ -7,7 +7,9 @@ import tempfile
 
 os.environ["PEAKCUT_DATA"] = tempfile.mkdtemp(prefix="pc-local-")
 os.environ.update(DATABASE_URL="", PEAKCUT_ACCOUNTS="0", PEAKCUT_AI_PROVIDER="gemini", PEAKCUT_AI_MODELS="", PEAKCUT_AI_KEY="",
-                  PEAKCUT_AI_KEY_FILE="", PEAKCUT_AI_BASE_URL="", PEAKCUT_PUBLIC_URL="http://127.0.0.1:8765")
+                  PEAKCUT_AI_KEY_FILE="", PEAKCUT_AI_BASE_URL="", PEAKCUT_PUBLIC_URL="http://127.0.0.1:8765",
+                  PEAKCUT_AI_FALLBACK_PROVIDER="", PEAKCUT_AI_FALLBACK_MODELS="", PEAKCUT_AI_FALLBACK_KEY="",
+                  PEAKCUT_AI_FALLBACK_KEY_FILE="", PEAKCUT_AI_FALLBACK_BASE_URL="")
 sys.path.insert(0, ".")
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -117,6 +119,22 @@ check("the test asks the saved model and reports back", (r.status_code, r.json()
 put({"provider": "gemini", "models": "g-fast", "key": "wrong-key-000000000000"})
 r = post("/api/ai/test")
 check("a failed test says why, without the key", (r.status_code, "wrong-key-000000000000" in r.text), (502, False))
+
+# ---- fallback service via /api/ai and /api/status, keeping saved OpenRouter key
+OR_KEY = "or-key-abcdefgh98765432"
+r_or = put({"provider": "openrouter", "models": "openrouter/free", "key": OR_KEY})
+check("openrouter saved first", r_or.status_code, 200)
+r_fb = put({"provider": "gemini", "models": "g-fast", "key": KEY,
+            "fallback_provider": "openrouter", "fallback_models": "openrouter/free", "fallback_key": ""})
+check("switching to gemini with openrouter fallback keeps openrouter key",
+      (r_fb.status_code, r_fb.json().get("fallback", {}).get("ready"), r_fb.json().get("fallback", {}).get("key_hint")),
+      (200, True, "5432"))
+st_fb = c.get("/api/status").json()["ai"]
+check("status reports fallback provider and model",
+      (st_fb.get("fallback_provider"), st_fb.get("fallback_model")), ("OpenRouter", "openrouter/free"))
+check("neither primary nor fallback key ever leaves the server",
+      any(k in t for k in (KEY, OR_KEY) for t in (r_fb.text, c.get("/api/ai").text, c.get("/api/status").text)), False)
+check("unconfigured provider still requires its own key", put({"provider": "openai", "models": "m"}).status_code, 400)
 
 print("ALL PASSED" if not fails else f"{len(fails)} failed")
 import shutil  # noqa: E402
