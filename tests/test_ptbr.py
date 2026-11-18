@@ -214,6 +214,43 @@ check("dashboard includes output language selector in Composer, Creator Setup an
       all(tok in app_html for tok in ('id="o_lang"', 'data-seg="o_lang"', 'data-k="output_lang"', 'id="e_lang"', 'data-f="output_lang"')),
       True)
 
+# ---- review fix pass: lang="" heuristics (short EN, Spanish with accents, PT->EN) & non-caching on AI failure
+short_en = ws("I don't think he can win it now man")
+spanish_acc = ws("hola amigo qué está pasando aquí en el juego")
+pt_acc = ws("mano não acredito no que aconteceu aqui")
+check("lang='' with output_lang='pt' detects short colloquial English and accented Spanish while keeping PT",
+      [brain.needs_translation("", "pt", short_en),
+       brain.needs_translation("", "pt", spanish_acc),
+       brain.needs_translation("", "pt", pt_acc)],
+      [True, True, False])
+check("lang='' with output_lang='en' translates PT speech to English while keeping bare lang='' False",
+      [brain.needs_translation("", "en", pt_acc),
+       brain.needs_translation("", "en", short_en),
+       brain.needs_translation("", "en")],
+      [True, False, False])
+
+with ctx.as_user(owner.id):
+    jb_retry = jobs.create({"type": "file", "path": "z.mp4", "name": "z.mp4"}, {"output_lang": "pt"}, enqueue=False)
+    jb_retry["lang"] = "en"
+    clip_retry = {"id": "clip99", "start": 0.0, "end": 6.0, "status": "done", "style": "bounce", "layout": "blur", "captions": True, "output_lang": "pt"}
+    jb_retry["clips"] = [clip_retry]
+
+    def broken_ai(*a, **k):
+        raise RuntimeError("429 quota exceeded")
+
+    brain.ask_ai = broken_ai
+    fallback_cap = jobs._caption_words(jb_retry, clip_retry, en_src, 0.0)
+    check("when AI fails during translation, fallback captions render without poisoning fixed_for cache",
+          ("wait" in joined(fallback_cap).lower(), clip_retry.get("fixed_for")),
+          (True, None))
+
+    brain.ask_ai = fake_ask_ai
+    trans_reply[:] = ["Espera, olha aquilo.", "Sem chance, mano!"]
+    recovered_cap = jobs._caption_words(jb_retry, clip_retry, en_src, 0.0)
+    check("after AI recovers, re-making clip translates captions and caches fixed_for",
+          ("Espera," in joined(recovered_cap), clip_retry.get("fixed_for")),
+          (True, [0.0, 6.0, "lang:pt"]))
+
 print("ALL PASSED" if not fails else f"{len(fails)} failed")
 db.engine.dispose()
 shutil.rmtree(os.environ["PEAKCUT_DATA"], ignore_errors=True)

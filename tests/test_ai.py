@@ -416,6 +416,37 @@ check("Gemini empty candidates response reports SAFETY reason instead of KeyErro
       and "KeyError" not in res_blocked["results"][0].get("detail", ""),
       str(res_blocked["results"][0]))
 
+# ---- review fix pass: Gemini thought parts, transient Windows OSError resilience, and health disk-write throttling
+ai.httpx.post = lambda url, json=None, headers=None, timeout=None, **_k: Reply(  # noqa: A002
+    200, {"candidates": [{"content": {"parts": [{"thought": True, "text": 'Thinking ["wrong"]...'}, {"text": '["ok"]'}]}}],
+          "usageMetadata": {"promptTokenCount": 5, "totalTokenCount": 9}}
+)
+ans_gem_thought, _, _ = ai.call("gemini-2.5-flash", "hi", {"type": "ARRAY", "items": {"type": "STRING"}}, provider_id="gemini")
+check("Gemini thought=True parts are skipped before JSON parsing",
+      ans_gem_thought == ["ok"], str(ans_gem_thought))
+
+ai.save("gemini", "g-steady", "", "gem-secret-key-44445555", fallback_provider="")
+ai.record_health("gemini", "g-steady", True, 120)
+mtime1 = (config.DATA_DIR / "ai.json").stat().st_mtime_ns
+import time as _t  # noqa: E402
+_t.sleep(0.02)
+ai.record_health("gemini", "g-steady", True, 115)
+mtime2 = (config.DATA_DIR / "ai.json").stat().st_mtime_ns
+check("repeated operational health checks within 5 min do not churn ai.json on disk",
+      mtime1 == mtime2, f"{mtime1} vs {mtime2}")
+
+# Transient PermissionError reading ai.json must not wipe loaded config in memory
+_ = ai.current()
+ai._saved["at"] = -1  # force re-read attempt
+orig_read_text = type(config.DATA_DIR / "ai.json").read_text
+type(config.DATA_DIR / "ai.json").read_text = lambda self, *a, **k: (_ for _ in ()).throw(PermissionError("WinError 32"))
+try:
+    kept_models = ai.models()
+finally:
+    type(config.DATA_DIR / "ai.json").read_text = orig_read_text
+check("transient Windows PermissionError on ai.json preserves in-memory config instead of wiping it",
+      kept_models == ["g-steady"], str(kept_models))
+
 print("ALL PASSED" if not fails else f"{len(fails)} failed")
 import shutil  # noqa: E402
 db.engine.dispose()

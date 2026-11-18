@@ -418,10 +418,12 @@ def _caption_words(job, clip, words, off):
         raw = [w for w in words if clip["start"] - 1 <= w["s"] <= clip["end"] + 1]
         try:
             usage.set_context(job.get("creator"), job.get("title") or "")
+            brain._caption_ctx.degraded = False
             raw = brain.english_captions(raw, job.get("lang") or "", job.get("title") or "",
                                          youtube_english=lambda: _youtube_part(job, clip, out_lang),
                                          output_lang=out_lang)
-            clip.update(fixed_words=raw, fixed_for=span)
+            if not getattr(brain._caption_ctx, "degraded", False):
+                clip.update(fixed_words=raw, fixed_for=span)
         except Exception:  # noqa: BLE001 - captions still render with the words as heard
             pass
     # the last word on it: whatever was said, nothing is drawn in Hindi or Urdu script

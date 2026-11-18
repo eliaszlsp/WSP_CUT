@@ -3,6 +3,7 @@ import difflib
 import json
 import math
 import re
+import threading
 import time
 import unicodedata
 
@@ -547,24 +548,48 @@ def judge_signals(z, chat, start, now, unit="messages", timeout=None):
 FIX_SCHEMA = {"type": "ARRAY", "items": {"type": "STRING"}}
 # Languages whose captions keep the words that were said when output_lang="en": English as it is, Hindi and Urdu in Roman letters.
 KEEP_LANGS = ("en", "hi", "ur")
-_PT_STOP = {"que", "nao", "uma", "isso", "esse", "essa", "olha", "mano", "cara", "aqui", "agora", "muito", "como",
-            "esta", "voce", "eles", "mais", "pelo", "pela", "entao", "tambem", "carro", "pista", "jogo", "galera",
-            "para", "com", "mas", "foi", "vai", "tem", "seu", "sua", "meu", "minha"}
+_caption_ctx = threading.local()
+_PT_STOP = {"nao", "uma", "isso", "esse", "essa", "olha", "mano", "cara", "agora", "muito", "voce", "voces",
+            "eles", "elas", "pelo", "pela", "entao", "tambem", "carro", "pista", "jogo", "galera", "fazer",
+            "feito", "tudo", "nada", "dele", "dela", "estava", "estou", "vamos", "gente", "caraca", "nossa", "velho"}
 _EN_STOP = {"the", "that", "this", "what", "with", "there", "right", "wait", "look", "from", "they", "have",
-            "your", "would", "about", "just", "like", "know", "bro", "here", "and", "you", "for", "was", "are"}
+            "your", "would", "about", "just", "like", "know", "bro", "here", "and", "you", "for", "was", "are",
+            "dont", "cant", "wont", "im", "its", "hes", "shes", "think", "can", "win", "now", "man", "dude",
+            "god", "way", "yeah", "going", "gonna", "wanna", "let", "lets", "out", "his", "her", "him", "she",
+            "he", "we", "my", "not", "why", "how", "when", "where", "who"}
+_OTHER_FOREIGN_STOP = {"hola", "amigo", "pasando", "juego", "pero", "esto", "estan", "muy", "bueno", "porque",
+                       "cuando", "donde", "el", "los", "las", "una", "avec", "dans", "pour", "cest", "tres",
+                       "nicht", "aber", "oder", "und", "ich", "wir", "das", "ist"}
 
 
 def _looks_non_portuguese(words: list | None) -> bool:
     if not words:
         return False
     raw_text = " ".join(str(w.get("w") or "") for w in words).lower()
-    if re.search(r"[ãõçáéíóúâêôà]", raw_text):
+    if roman.needs_roman(raw_text) or re.search(r"[ñ¿¡äöüß]", raw_text):
+        return True
+    if re.search(r"[ãõ]", raw_text):
         return False
     tokens = [re.sub(r"[^a-z]", "", _ascii_fold(t)) for t in raw_text.split()]
     tokens = [t for t in tokens if t]
     pt_hits = sum(1 for t in tokens if t in _PT_STOP)
+    foreign_hits = sum(1 for t in tokens if t in _EN_STOP or t in _OTHER_FOREIGN_STOP)
+    return foreign_hits >= 2 and foreign_hits > pt_hits
+
+
+def _looks_non_english(words: list | None) -> bool:
+    if not words:
+        return False
+    raw_text = " ".join(str(w.get("w") or "") for w in words).lower()
+    if roman.has_hindi(raw_text):
+        return False
+    if roman.needs_roman(raw_text) or re.search(r"[ãõçáéíóúâêôàñ¿¡äöüß]", raw_text):
+        return True
+    tokens = [re.sub(r"[^a-z]", "", _ascii_fold(t)) for t in raw_text.split()]
+    tokens = [t for t in tokens if t]
     en_hits = sum(1 for t in tokens if t in _EN_STOP)
-    return en_hits >= 2 and en_hits > pt_hits
+    non_en_hits = sum(1 for t in tokens if t in _PT_STOP or t in _OTHER_FOREIGN_STOP)
+    return non_en_hits >= 2 and non_en_hits > en_hits
 
 
 def needs_translation(lang: str, output_lang: str = "en", words: list | None = None) -> bool:
@@ -577,7 +602,9 @@ def needs_translation(lang: str, output_lang: str = "en", words: list | None = N
         if l:
             return not l.startswith("pt")
         return _looks_non_portuguese(words)
-    return bool(l) and not l.startswith(KEEP_LANGS)
+    if l:
+        return not l.startswith(KEEP_LANGS)
+    return _looks_non_english(words)
 
 
 def _spread(text: str, s: float, e: float) -> list:
@@ -629,6 +656,7 @@ def captions_for(words: list, lang: str, title: str = "", output_lang: str = "en
     try:
         return roman.words(translate_caption_words(words, lang, title, target_lang=out_lang))
     except Exception:  # noqa: BLE001
+        _caption_ctx.degraded = True
         return roman.words(words)
 
 
@@ -679,6 +707,7 @@ def _fix_caption_words(words: list, title: str = "", lang: str = "", output_lang
     try:
         out, _m, _u = ask_ai(prompt, FIX_SCHEMA, purpose="Caption wording fix")
     except Exception:
+        _caption_ctx.degraded = True
         return words
     if not isinstance(out, list) or len(out) != len(words):
         return words

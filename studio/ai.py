@@ -38,7 +38,7 @@ ALIASES = {"google": "gemini", "grok": "xai", "claude": "anthropic", "local": "o
 NO_KEY = {"ollama", "custom"}       # a model running on your own machine needs no key
 
 # ---------------------------------------------------------------- the settings in use
-_lock = threading.Lock()
+_lock = threading.RLock()
 _saved = {"at": None, "data": {}}
 _health: dict = {}      # (provider, model, cred_fingerprint) -> {"state", "ok", "ms", "at", "error"}
 
@@ -54,18 +54,25 @@ def _norm(p: str) -> str:
 
 def _from_dashboard() -> dict:
     """What was saved from the dashboard, read again only when the file changes."""
-    f = _file()
-    try:
-        at = f.stat().st_mtime_ns
-    except OSError:
-        at = 0
-    if _saved["at"] != at:
+    with _lock:
+        f = _file()
         try:
-            data = json.loads(f.read_text(encoding="utf-8")) if at else {}
-        except (OSError, ValueError):
-            data = {}
-        _saved.update(at=at, data=data if isinstance(data, dict) else {})
-    return _saved["data"]
+            at = f.stat().st_mtime_ns
+        except OSError:
+            at = 0
+        if _saved["at"] != at:
+            if not at:
+                _saved.update(at=0, data={})
+            else:
+                try:
+                    data = json.loads(f.read_text(encoding="utf-8"))
+                    _saved.update(at=at, data=data if isinstance(data, dict) else {})
+                except OSError:
+                    if not _saved["data"]:
+                        _saved.update(at=at, data={})
+                except ValueError:
+                    _saved.update(at=at, data={})
+        return _saved["data"]
 
 
 def _profiles(d: dict | None = None) -> dict:
@@ -280,29 +287,34 @@ def diagnose(e, provider_id: str | None = None, model: str | None = None, extra_
 
 def _persist_health(hkey: str, rec: dict):
     """Save redacted health check state into ai.json when ai.json already exists on disk."""
-    f = _file()
-    if not f.is_file():
-        return
-    try:
-        data = json.loads(f.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
+    with _lock:
+        f = _file()
+        if not f.is_file():
             return
-        hmap = dict(data.get("health") or {}) if isinstance(data.get("health"), dict) else {}
+        cur = _from_dashboard()
+        if not isinstance(cur, dict):
+            return
+        hmap = dict(cur.get("health") or {}) if isinstance(cur.get("health"), dict) else {}
+        prev = hmap.get(hkey)
+        if (isinstance(prev, dict) and prev.get("state") == "operational" and rec.get("state") == "operational"
+                and (float(rec.get("at") or 0) - float(prev.get("at") or 0)) < 300):
+            return
         hmap[hkey] = rec
         if len(hmap) > 40:
             newest = sorted(hmap.items(), key=lambda kv: float((kv[1] or {}).get("at") or 0), reverse=True)[:40]
             hmap = dict(newest)
-        data["health"] = hmap
-        tmp = f.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data), encoding="utf-8")
+        data = {**cur, "health": hmap}
         try:
-            os.chmod(tmp, 0o600)
+            tmp = f.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data), encoding="utf-8")
+            try:
+                os.chmod(tmp, 0o600)
+            except OSError:
+                pass
+            tmp.replace(f)
+            _saved.update(at=f.stat().st_mtime_ns, data=data)
         except OSError:
             pass
-        tmp.replace(f)
-        _saved["at"] = None
-    except (OSError, ValueError):
-        pass
 
 
 def record_health(provider_id: str, model: str, ok: bool, ms: int = 0, error=None, cfg: dict | None = None, extra_key: str = "") -> dict:
@@ -409,59 +421,59 @@ def save(provider_id: str, model_ids, address: str = "", new_key=None,
         raise ValueError("Choose one of the AI services in the list.")
     ms = _clean_models(model_ids, "Enter the model to use.")
     address = _clean_address(p, address, "A")
-    raw = _from_dashboard()
-    profs = _profiles(raw)
-    old = current()
-    saved_p_key = profs.get(p, {}).get("key", "") or (old["key"] if old["provider"] == p else "")
-    k = saved_p_key if new_key is None else str(new_key or "").strip()[:400]
-    if not k and p not in NO_KEY:
-        raise ValueError("Paste the key for this service.")
-    if k and len(k) < 8:
-        raise ValueError("That key looks too short. Paste the full key from the service.")
-    profs[p] = {"models": ms, "base_url": address, "key": k}
-
-    write_fb = True
-    if fallback_provider is None:
-        if "fallback" in raw:
-            cur_fb = raw.get("fallback") if isinstance(raw.get("fallback"), dict) else {}
-            fb_data = dict(cur_fb) if cur_fb and _norm(cur_fb.get("provider")) != p else {}
-        elif _norm(config.AI_FALLBACK_PROVIDER) == p:
-            fb_data = {}
-        else:
-            write_fb, fb_data = False, {}
-    else:
-        fp = _norm(fallback_provider)
-        if fp in ("", "none"):
-            fb_data = {}
-        else:
-            if fp not in PROVIDERS:
-                raise ValueError("Choose one of the AI services in the list for the fallback.")
-            if fp == p:
-                raise ValueError("Choose a different service for the fallback, or add a second model above after a comma.")
-            saved_fb = profs.get(fp, {})
-            raw_fms = fallback_models
-            if raw_fms is None or (isinstance(raw_fms, str) and not raw_fms.strip()) or raw_fms == []:
-                raw_fms = saved_fb.get("models") or (old["models"] if old["provider"] == fp else []) or (
-                    config.AI_FALLBACK_MODELS if fp == _norm(config.AI_FALLBACK_PROVIDER) else [])
-            fms = _clean_models(raw_fms, "Enter the model to use for the fallback service.")
-            raw_faddr = saved_fb.get("base_url", "") if fallback_address is None else fallback_address
-            faddr = _clean_address(fp, raw_faddr, "A fallback")
-            saved_fb_key = saved_fb.get("key", "") or (old["key"] if old["provider"] == fp else "") or (
-                config.ai_fallback_key() if fp == _norm(config.AI_FALLBACK_PROVIDER) else "")
-            fk = saved_fb_key if fallback_key is None else str(fallback_key or "").strip()[:400]
-            if not fk and fp not in NO_KEY:
-                raise ValueError("Paste the key for the fallback service.")
-            if fk and len(fk) < 8:
-                raise ValueError("That fallback key looks too short. Paste the full key from the service.")
-            fb_data = {"provider": fp, "models": fms, "base_url": faddr, "key": fk}
-            profs[fp] = {"models": fms, "base_url": faddr, "key": fk}
-
-    payload = {"provider": p, "models": ms, "base_url": address, "key": k, "profiles": profs}
-    if write_fb:
-        payload["fallback"] = fb_data
-    if isinstance(raw.get("health"), dict):
-        payload["health"] = dict(raw["health"])
     with _lock:
+        raw = _from_dashboard()
+        profs = _profiles(raw)
+        old = current()
+        saved_p_key = profs.get(p, {}).get("key", "") or (old["key"] if old["provider"] == p else "")
+        k = saved_p_key if new_key is None else str(new_key or "").strip()[:400]
+        if not k and p not in NO_KEY:
+            raise ValueError("Paste the key for this service.")
+        if k and len(k) < 8:
+            raise ValueError("That key looks too short. Paste the full key from the service.")
+        profs[p] = {"models": ms, "base_url": address, "key": k}
+
+        write_fb = True
+        if fallback_provider is None:
+            if "fallback" in raw:
+                cur_fb = raw.get("fallback") if isinstance(raw.get("fallback"), dict) else {}
+                fb_data = dict(cur_fb) if cur_fb and _norm(cur_fb.get("provider")) != p else {}
+            elif _norm(config.AI_FALLBACK_PROVIDER) == p:
+                fb_data = {}
+            else:
+                write_fb, fb_data = False, {}
+        else:
+            fp = _norm(fallback_provider)
+            if fp in ("", "none"):
+                fb_data = {}
+            else:
+                if fp not in PROVIDERS:
+                    raise ValueError("Choose one of the AI services in the list for the fallback.")
+                if fp == p:
+                    raise ValueError("Choose a different service for the fallback, or add a second model above after a comma.")
+                saved_fb = profs.get(fp, {})
+                raw_fms = fallback_models
+                if raw_fms is None or (isinstance(raw_fms, str) and not raw_fms.strip()) or raw_fms == []:
+                    raw_fms = saved_fb.get("models") or (old["models"] if old["provider"] == fp else []) or (
+                        config.AI_FALLBACK_MODELS if fp == _norm(config.AI_FALLBACK_PROVIDER) else [])
+                fms = _clean_models(raw_fms, "Enter the model to use for the fallback service.")
+                raw_faddr = saved_fb.get("base_url", "") if fallback_address is None else fallback_address
+                faddr = _clean_address(fp, raw_faddr, "A fallback")
+                saved_fb_key = saved_fb.get("key", "") or (old["key"] if old["provider"] == fp else "") or (
+                    config.ai_fallback_key() if fp == _norm(config.AI_FALLBACK_PROVIDER) else "")
+                fk = saved_fb_key if fallback_key is None else str(fallback_key or "").strip()[:400]
+                if not fk and fp not in NO_KEY:
+                    raise ValueError("Paste the key for the fallback service.")
+                if fk and len(fk) < 8:
+                    raise ValueError("That fallback key looks too short. Paste the full key from the service.")
+                fb_data = {"provider": fp, "models": fms, "base_url": faddr, "key": fk}
+                profs[fp] = {"models": fms, "base_url": faddr, "key": fk}
+
+        payload = {"provider": p, "models": ms, "base_url": address, "key": k, "profiles": profs}
+        if write_fb:
+            payload["fallback"] = fb_data
+        if isinstance(raw.get("health"), dict):
+            payload["health"] = dict(raw["health"])
         f = _file()
         tmp = f.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload), encoding="utf-8")
@@ -470,8 +482,8 @@ def save(provider_id: str, model_ids, address: str = "", new_key=None,
         except OSError:
             pass
         tmp.replace(f)
-        _saved["at"] = None
-    return public()
+        _saved.update(at=f.stat().st_mtime_ns, data=payload)
+        return public()
 
 
 def list_models(provider_id=None, address=None, with_key=None) -> list:
@@ -741,7 +753,9 @@ def _see_one(cfg: dict, model: str, prompt: str, b64: str, timeout: float | None
         if not cands:
             why = (data.get("promptFeedback") or {}).get("blockReason") or data.get("error") or "empty response"
             raise AIError(f"Gemini returned no candidates ({redact(why)[:200]})", provider_id=pid, model=model)
-        text = "".join(p.get("text", "") for p in ((cands[0].get("content") or {}).get("parts") or []) if isinstance(p, dict))
+        raw_parts = [p for p in ((cands[0].get("content") or {}).get("parts") or []) if isinstance(p, dict)]
+        ans_parts = [p for p in raw_parts if not p.get("thought")] or raw_parts
+        text = "".join(p.get("text", "") for p in ans_parts)
         u = data.get("usageMetadata", {})
         sent = int(u.get("promptTokenCount") or 0)
         return text, sent, max(0, int(u.get("totalTokenCount") or 0) - sent)
@@ -820,7 +834,9 @@ def _gemini(model, prompt, schema, timeout=None, cfg=None):
     if not cands:
         why = (data.get("promptFeedback") or {}).get("blockReason") or data.get("error") or "empty response"
         raise AIError(f"Gemini returned no candidates ({redact(why)[:200]})", provider_id=cfg["provider"], model=model)
-    text = "".join(p.get("text", "") for p in ((cands[0].get("content") or {}).get("parts") or []) if isinstance(p, dict))
+    raw_parts = [p for p in ((cands[0].get("content") or {}).get("parts") or []) if isinstance(p, dict)]
+    ans_parts = [p for p in raw_parts if not p.get("thought")] or raw_parts
+    text = "".join(p.get("text", "") for p in ans_parts)
     u = data.get("usageMetadata", {})
     sent = int(u.get("promptTokenCount") or 0)
     try:
