@@ -11,7 +11,7 @@ import shutil
 import threading
 import time
 from pathlib import Path
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 import sqlalchemy as sa
 import uvicorn
@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 
 from . import admin as admins
 from . import account, load
-from . import (accounts, ai, alerts, auth, brain, config, creators, ctx, db, jobs, live, media, posting,
+from . import (accounts, ai, alerts, auth, brain, config, creators, ctx, db, gdrive, jobs, live, media, posting,
                profiles, render, safe, transcribe, usage)
 
 from . import tools as _tools  # noqa: E402
@@ -72,6 +72,7 @@ def _startup():
     jobs.start()
     live.start()
     posting.start()
+    gdrive.start()
     from . import updates
     updates.start()                  # looks for a newer PeakCut every minute, in the background
 
@@ -576,7 +577,9 @@ def status(request: Request):
     me_ = _me(request)
     return {"user": auth.public(me_), "update": updates.latest() if me_.is_admin else None, "accounts": config.ACCOUNTS, "disk_full": load.disk_full(), "no_ffmpeg": bool(_tools.missing()), "links": {"repo": config.REPO_URL, "follow": config.FOLLOW_URL}, "ai": usage.brief(), "unread": notices.unread(),
             "tour": not accounts.settings()["tour_done"],
-            "youtube": accounts.youtube_ready(), "connect": {p: accounts.can_connect(p) for p in accounts.PLATFORM_NAMES}, "max_upload_mb": config.MAX_UPLOAD_MB, "upload_part_mb": config.UPLOAD_PART_MB, "max_batch": config.MAX_ACTIVE_JOBS_PER_USER,
+            "youtube": accounts.youtube_ready(), "connect": {p: accounts.can_connect(p) for p in accounts.PLATFORM_NAMES},
+            "gdrive": {"ready": gdrive.can_connect(), "connected": gdrive.is_connected(), "queued": gdrive.queued_for_me()},
+            "max_upload_mb": config.MAX_UPLOAD_MB, "upload_part_mb": config.UPLOAD_PART_MB, "max_batch": config.MAX_ACTIVE_JOBS_PER_USER,
             "styles": {k: v["label"] for k, v in render.STYLES.items()}, "layouts": render.LAYOUTS,
             "languages": brain.OUTPUT_LANGS, "default_lang": config.OUTPUT_LANG}
 
@@ -673,7 +676,9 @@ def sync(v: str = ""):
         return _sync_unchanged(v) or {"v": token}
     from . import notices
     return {"v": token, "jobs": [jobs.public(j) for j in jobs.list_jobs()], "creators": _creator_rows(),
-            "accounts": accounts.list_accounts(), "ai": usage.brief(), "unread": notices.unread()}
+            "accounts": accounts.list_accounts(),
+            "gdrive": {"ready": gdrive.can_connect(), "connected": gdrive.is_connected(), "queued": gdrive.queued_for_me()},
+            "ai": usage.brief(), "unread": notices.unread()}
 
 
 @app.get("/api/jobs")
@@ -973,6 +978,18 @@ def delete_clip(jid: str, cid: str):
     return {"ok": True}
 
 
+@app.post("/api/jobs/{jid}/clips/{cid}/archive")
+def archive_clip(jid: str, cid: str):
+    _throttle("gdarch:" + ctx.uid(), 60, 600)
+    _job_or_404(jid)
+    try:
+        queued = gdrive.request_archive(jid, cid)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    _disk.pop(ctx.uid(), None)
+    return {"ok": True, "queued": queued}
+
+
 @app.post("/api/bulk/delete")
 def bulk_delete(body: dict = Body(...)):
     _throttle("bulkdel:" + ctx.uid(), 30, 600)
@@ -1027,8 +1044,13 @@ def delete_my_account(request: Request, body: dict = Body(...)):
 def media_file(jid: str, name: str, download: int = 0):
     if not re.fullmatch(r"[\w\-]+\.(mp4|jpg)", name):
         raise HTTPException(404)
-    f = Path(_job_or_404(jid)["dir"]) / "clips" / name
-    if not f.is_file():
+    job = _job_or_404(jid)
+    f = Path(job["dir"]) / "clips" / name
+    if not f.is_file() and name.endswith(".mp4"):
+        clip = next((c for c in job.get("clips", []) if c.get("file") == name and c.get("drive")), None)
+        if clip:
+            f = gdrive.ensure_local(job, clip) or f
+    if not f or not f.is_file():
         raise HTTPException(404)
     return FileResponse(f, filename=name if download else None, headers={"Cache-Control": "private, max-age=300"})
 
@@ -1359,8 +1381,34 @@ def remove_account(aid: str):
 # Connect sends the browser to the platform's own sign-in page; the platform sends it back here, and the person lands
 # on Settings, Connected apps, with the account added (or a message saying what went wrong).
 def _back(**q):
-    from urllib.parse import urlencode as _ue
-    return RedirectResponse("/app/settings/apps?" + _ue(q), 303)
+    return RedirectResponse("/app/settings/apps?" + urlencode(q), 303)
+
+
+def _storage_back(**q):
+    return RedirectResponse("/app/settings/storage" + ("?" + urlencode(q) if q else ""), 303)
+
+
+@app.get("/oauth/gdrive/start")
+def gdrive_start():
+    try:
+        return RedirectResponse(gdrive.connect_url(), 303)
+    except ValueError as e:
+        return _storage_back(gdrive_error=str(e))
+
+
+@app.get("/oauth/gdrive/callback")
+def gdrive_callback(code: str = "", state: str = "", error: str = "", error_description: str = ""):
+    if error or not code:
+        why = "you cancelled" if error in ("access_denied",) else (error_description or error or "no sign-in code came back")
+        return _storage_back(gdrive_error=f"Google Drive was not connected: {why[:160]}.")
+    try:
+        _throttle("gdconnect:" + ctx.uid(), 30, 600)
+        st = gdrive.connect_finish(code, state)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        return _storage_back(gdrive_error=f"Google Drive was not connected: {safe.friendly(e, 240)}")
+    return _storage_back(gdrive_connected=st.get("email") or "1")
 
 
 @app.get("/oauth/{platform}/start")
@@ -1402,6 +1450,10 @@ def public_clip(token: str):
     with ctx.as_user(uid):
         job = jobs.get(job_id) if re.fullmatch(r"[\w\-]{8,60}", job_id) else None
         f = Path(job["dir"]) / "clips" / name if job else None
+        if job and (not f or not f.is_file()):
+            clip = next((c for c in job.get("clips", []) if c.get("file") == name and c.get("drive")), None)
+            if clip:
+                f = gdrive.ensure_local(job, clip)
     if not f or not f.is_file():
         raise HTTPException(404)
     return FileResponse(f, media_type="video/mp4", headers={"Cache-Control": "private, no-store"})
@@ -1455,6 +1507,34 @@ def storage_put(request: Request, body: dict = Body(...)):
     except ValueError as e:
         raise HTTPException(400, str(e))
     return storage.info(_on_this_computer(request))
+
+
+@app.get("/api/gdrive")
+def gdrive_get():
+    return gdrive.public_status(include_quota=True)
+
+
+@app.put("/api/gdrive")
+def gdrive_put(body: dict = Body(...)):
+    _throttle("gdsave:" + ctx.uid(), 60, 600)
+    try:
+        return gdrive.save_settings(body)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/gdrive")
+def gdrive_delete():
+    _throttle("gddel:" + ctx.uid(), 20, 600)
+    return gdrive.disconnect()
+
+
+@app.post("/api/gdrive/sweep")
+def gdrive_sweep():
+    _throttle("gdsweep:" + ctx.uid(), 20, 600)
+    res = gdrive.sweep_user(ctx.uid(), force=True)
+    _disk.pop(ctx.uid(), None)
+    return {**res, "gdrive": gdrive.public_status(include_quota=False)}
 
 
 @app.get("/api/apps")

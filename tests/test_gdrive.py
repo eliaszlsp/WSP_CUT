@@ -1445,6 +1445,284 @@ try:
     gdrive.forget(fg_user.id)
     check("forget(uid) unlinks gdrive.json", not fg_json.exists(), True)
 
+    # ---- 18. Task 3: Server HTTP routes, OAuth flow, security boundaries & on-demand media proxy
+    from fastapi.testclient import TestClient
+    from studio import live, render as _render_mod, server, updates
+
+    BASE_URL = "https://clips.example.com"
+    ORIGIN_HDR = {"Origin": BASE_URL}
+    EVIL_ORIGIN = {"Origin": "https://evil.example"}
+
+    def make_client(user_obj=None):
+        cl = TestClient(server.app, base_url=BASE_URL, follow_redirects=False)
+        if user_obj is not None:
+            cl.cookies.set(auth.COOKIE, auth.start_session(user_obj.id))
+        return cl
+
+    cl_alice = make_client(alice)
+    cl_bob = make_client(bob)
+    cl_anon = make_client(None)
+
+    # 18a. _startup() starts gdrive worker alongside posting
+    startup_order = []
+    orig_hooks = (
+        _render_mod.install_fonts,
+        jobs.start,
+        live.start,
+        posting.start,
+        getattr(server, "gdrive", gdrive).start if hasattr(server, "gdrive") else gdrive.start,
+        updates.start,
+        os.environ.get("PEAKCUT_FETCH_MODEL"),
+    )
+    os.environ["PEAKCUT_FETCH_MODEL"] = "0"
+    _render_mod.install_fonts = lambda: startup_order.append("fonts")
+    jobs.start = lambda: startup_order.append("jobs")
+    live.start = lambda: startup_order.append("live")
+    posting.start = lambda: startup_order.append("posting")
+    gdrive_start_orig = gdrive.start
+    gdrive.start = lambda: startup_order.append("gdrive")
+    updates.start = lambda: startup_order.append("updates")
+    try:
+        server._startup()
+    finally:
+        _render_mod.install_fonts, jobs.start, live.start, posting.start, _, updates.start, prev_fm = orig_hooks
+        gdrive.start = gdrive_start_orig
+        if prev_fm is None:
+            os.environ.pop("PEAKCUT_FETCH_MODEL", None)
+        else:
+            os.environ["PEAKCUT_FETCH_MODEL"] = prev_fm
+    check("_startup calls gdrive.start() right after posting.start()",
+          ("posting" in startup_order and "gdrive" in startup_order
+           and startup_order.index("gdrive") == startup_order.index("posting") + 1),
+          True)
+
+    # 18b. /api/status and /api/sync include gdrive summary without leaking secrets
+    gdrive._inflight.add((alice.id, "inflight_j", "inflight_c"))
+    try:
+        r_status = cl_alice.get("/api/status")
+        st_json = r_status.json()
+        r_sync = cl_alice.get("/api/sync")
+        sy_json = r_sync.json()
+    finally:
+        gdrive._inflight.discard((alice.id, "inflight_j", "inflight_c"))
+
+    check("/api/status includes gdrive ready, connected and queued summary",
+          (r_status.status_code, st_json.get("gdrive")),
+          (200, {"ready": True, "connected": True, "queued": 1}))
+    check("/api/sync includes gdrive ready, connected and queued summary",
+          (r_sync.status_code, sy_json.get("gdrive")),
+          (200, {"ready": True, "connected": True, "queued": 1}))
+    combined_dump = json.dumps(st_json) + json.dumps(sy_json)
+    check("/api/status and /api/sync never leak OAuth tokens or client secrets",
+          any(tok in combined_dump for tok in ("gd-access-1", "gd-access-refreshed", "gd-refresh-1", "gdrive-secret-xyz")),
+          False)
+
+    # 18c. Multi-user isolation BEFORE Bob connects: Bob sees his own disconnected /api/gdrive & /api/status
+    r_bob_gd0 = cl_bob.get("/api/gdrive")
+    r_bob_st0 = cl_bob.get("/api/status")
+    check("user B sees own disconnected /api/gdrive and /api/status while user A is connected",
+          (r_bob_gd0.status_code,
+           r_bob_gd0.json().get("connected") if r_bob_gd0.status_code == 200 else None,
+           r_bob_gd0.json().get("email") if r_bob_gd0.status_code == 200 else None,
+           r_bob_gd0.json().get("archived_count") if r_bob_gd0.status_code == 200 else None,
+           (r_bob_st0.json().get("gdrive") or {}).get("connected")),
+          (200, False, "", 0, False))
+
+    # 18d. OAuth routes: before setup -> gdrive_error; after setup -> Google auth -> callback -> Storage page
+    apps_file = accounts._apps_file()
+    saved_apps_bytes = apps_file.read_bytes() if apps_file.is_file() else None
+    apps_file.unlink(missing_ok=True)
+    accounts._apps_seen["at"] = None
+    try:
+        r_start_unconf = cl_bob.get("/oauth/gdrive/start")
+        loc_unconf = r_start_unconf.headers.get("location", "")
+        qs_unconf = parse_qs(urlparse(loc_unconf).query)
+        check("/oauth/gdrive/start before Google setup redirects to /app/settings/storage with gdrive_error",
+              (r_start_unconf.status_code, urlparse(loc_unconf).path, "gdrive_error" in qs_unconf),
+              (303, "/app/settings/storage", True))
+    finally:
+        if saved_apps_bytes is not None:
+            apps_file.write_bytes(saved_apps_bytes)
+            accounts._apps_seen["at"] = None
+
+    r_start_ok = cl_bob.get("/oauth/gdrive/start")
+    loc_ok = urlparse(r_start_ok.headers.get("location", ""))
+    qs_ok = parse_qs(loc_ok.query)
+    check("/oauth/gdrive/start after setup redirects to accounts.google.com with drive.file scope",
+          (r_start_ok.status_code, loc_ok.netloc,
+           "drive.file" in (qs_ok.get("scope", [""])[0]),
+           qs_ok.get("redirect_uri", [""])[0]),
+          (303, "accounts.google.com", True, BASE_URL + "/oauth/gdrive/callback"))
+
+    # Cancelled OAuth (access_denied)
+    r_cb_cancel = cl_bob.get("/oauth/gdrive/callback", params={"error": "access_denied"})
+    loc_cancel = urlparse(r_cb_cancel.headers.get("location", ""))
+    err_cancel = parse_qs(loc_cancel.query).get("gdrive_error", [""])[0]
+    check("/oauth/gdrive/callback with access_denied redirects with cancelled message",
+          (r_cb_cancel.status_code, loc_cancel.path, "cancelled" in err_cancel.lower()),
+          (303, "/app/settings/storage", True))
+
+    # Missing code
+    r_cb_nocode = cl_bob.get("/oauth/gdrive/callback")
+    err_nocode = parse_qs(urlparse(r_cb_nocode.headers.get("location", "")).query).get("gdrive_error", [""])[0]
+    check("/oauth/gdrive/callback without code redirects with gdrive_error",
+          (r_cb_nocode.status_code, "no sign-in code" in err_nocode.lower()),
+          (303, True))
+
+    # Forged state
+    r_cb_forged = cl_bob.get("/oauth/gdrive/callback", params={"code": "good-code", "state": "forged-state-token"})
+    loc_forged = urlparse(r_cb_forged.headers.get("location", ""))
+    err_forged = parse_qs(loc_forged.query).get("gdrive_error", [""])[0]
+    check("/oauth/gdrive/callback with forged state redirects with gdrive_error",
+          (r_cb_forged.status_code, loc_forged.path, bool(err_forged)),
+          (303, "/app/settings/storage", True))
+
+    # Cross-user OAuth state (Alice's state used by Bob)
+    r_alice_start = cl_alice.get("/oauth/gdrive/start")
+    alice_state = parse_qs(urlparse(r_alice_start.headers.get("location", "")).query).get("state", [""])[0]
+    r_cb_cross = cl_bob.get("/oauth/gdrive/callback", params={"code": "good-code", "state": alice_state})
+    err_cross = parse_qs(urlparse(r_cb_cross.headers.get("location", "")).query).get("gdrive_error", [""])[0]
+    check("cross-user /oauth/gdrive/callback state rejected with gdrive_error",
+          (r_cb_cross.status_code, bool(err_cross)),
+          (303, True))
+
+    # Successful callback for Bob
+    state_mock["email"] = "bob-drive@example.com"
+    bob_state = qs_ok.get("state", [""])[0]
+    r_cb_ok = cl_bob.get("/oauth/gdrive/callback", params={"code": "bob-auth-code", "state": bob_state})
+    loc_cb_ok = urlparse(r_cb_ok.headers.get("location", ""))
+    qs_cb_ok = parse_qs(loc_cb_ok.query)
+    check("/oauth/gdrive/callback connects Google Drive and redirects with gdrive_connected",
+          (r_cb_ok.status_code, loc_cb_ok.path, qs_cb_ok.get("gdrive_connected")),
+          (303, "/app/settings/storage", ["bob-drive@example.com"]))
+
+    # Platform OAuth routes after /oauth/gdrive/* still work as expected
+    check("unknown /oauth/{platform}/start still returns 404", cl_bob.get("/oauth/myspace/start").status_code, 404)
+
+    # 18e. GET / PUT / DELETE /api/gdrive, POST /api/gdrive/sweep, POST /api/jobs/{jid}/clips/{cid}/archive
+    r_gd_get = cl_bob.get("/api/gdrive")
+    gd_bob = r_gd_get.json() if r_gd_get.status_code == 200 else {}
+    check("GET /api/gdrive returns connected public_status with quota and no leaked secrets",
+          (r_gd_get.status_code,
+           gd_bob.get("connected"),
+           gd_bob.get("email"),
+           gd_bob.get("quota"),
+           any(s in r_gd_get.text for s in ("gd-access-1", "gd-refresh-1", "gdrive-secret-xyz"))),
+          (200, True, "bob-drive@example.com", {"limit_gb": 2000.0, "used_gb": 500.0, "free_gb": 1500.0}, False))
+
+    r_gd_put = cl_bob.put("/api/gdrive", json={"auto_after_post": False, "auto_days": 14}, headers=ORIGIN_HDR)
+    check("PUT /api/gdrive updates auto_after_post and auto_days",
+          (r_gd_put.status_code,
+           r_gd_put.json().get("auto_after_post") if r_gd_put.status_code == 200 else None,
+           r_gd_put.json().get("auto_days") if r_gd_put.status_code == 200 else None),
+          (200, False, 14))
+
+    r_gd_bad1 = cl_bob.put("/api/gdrive", json={"auto_days": "not-an-int"}, headers=ORIGIN_HDR)
+    r_gd_bad2 = cl_bob.put("/api/gdrive", json={"auto_days": True}, headers=ORIGIN_HDR)
+    check("PUT /api/gdrive returns 400 on invalid auto_days",
+          (r_gd_bad1.status_code, r_gd_bad2.status_code),
+          (400, 400))
+
+    # Create two local clips for Alice to test POST /api/jobs/{jid}/clips/{cid}/archive and POST /api/gdrive/sweep
+    with ctx.as_user(alice.id):
+        j_http = make_job_with_clips([
+            {"id": "clip01", "title": "HTTP Manual Archive"},
+            {"id": "clip02", "title": "HTTP Sweep Archive"},
+        ])
+    server._disk[alice.id] = (time.time(), 12345)
+    r_arch = cl_alice.post(f"/api/jobs/{j_http['id']}/clips/clip01/archive", headers=ORIGIN_HDR)
+    check("POST /api/jobs/{jid}/clips/{cid}/archive queues clip and invalidates _disk cache",
+          (r_arch.status_code, r_arch.json() if r_arch.status_code == 200 else None, alice.id not in server._disk),
+          (200, {"ok": True, "queued": True}, True))
+    gdrive.drain_queue()
+
+    # Archiving an already-archived clip returns 400; unknown job returns 404
+    r_arch_dup = cl_alice.post(f"/api/jobs/{j_http['id']}/clips/clip01/archive", headers=ORIGIN_HDR)
+    r_arch_404 = cl_alice.post("/api/jobs/nonexistent_job_1234/clips/clip01/archive", headers=ORIGIN_HDR)
+    check("POST archive returns 400 when already archived and 404 for unknown job",
+          (r_arch_dup.status_code, r_arch_404.status_code),
+          (400, 404))
+
+    # POST /api/gdrive/sweep queues remaining unarchived clip02 (force=True) and invalidates _disk
+    server._disk[alice.id] = (time.time(), 54321)
+    r_sweep = cl_alice.post("/api/gdrive/sweep", headers=ORIGIN_HDR)
+    sw_json = r_sweep.json() if r_sweep.status_code == 200 else {}
+    check("POST /api/gdrive/sweep forces archive sweep, invalidates _disk, and returns gdrive status",
+          (r_sweep.status_code,
+           sw_json.get("queued", 0) >= 1,
+           isinstance(sw_json.get("gdrive"), dict) and sw_json["gdrive"].get("connected") is True,
+           alice.id not in server._disk),
+          (200, True, True, True))
+    gdrive.drain_queue()
+
+    # DELETE /api/gdrive disconnects Bob
+    r_gd_del = cl_bob.delete("/api/gdrive", headers=ORIGIN_HDR)
+    check("DELETE /api/gdrive disconnects user's Google Drive",
+          (r_gd_del.status_code,
+           r_gd_del.json().get("connected") if r_gd_del.status_code == 200 else None,
+           r_gd_del.json().get("email") if r_gd_del.status_code == 200 else None),
+          (200, False, ""))
+
+    # 18f. Security: CSRF Origin enforcement, unauthenticated rejection, and cross-tenant isolation
+    check("Cross-site Origin rejected (403) on PUT /api/gdrive",
+          cl_alice.put("/api/gdrive", json={"auto_days": 7}, headers=EVIL_ORIGIN).status_code, 403)
+    check("Cross-site Origin rejected (403) on DELETE /api/gdrive",
+          cl_alice.delete("/api/gdrive", headers=EVIL_ORIGIN).status_code, 403)
+    check("Cross-site Origin rejected (403) on POST /api/gdrive/sweep",
+          cl_alice.post("/api/gdrive/sweep", headers=EVIL_ORIGIN).status_code, 403)
+    check("Cross-site Origin rejected (403) on POST /api/jobs/{jid}/clips/{cid}/archive",
+          cl_alice.post(f"/api/jobs/{j_multi['id']}/clips/clip01/archive", headers=EVIL_ORIGIN).status_code, 403)
+
+    check("Unauthenticated client rejected (401) on /api/gdrive and /media/",
+          (cl_anon.get("/api/gdrive").status_code,
+           cl_anon.get("/oauth/gdrive/start").status_code,
+           cl_anon.get(f"/media/{j_multi['id']}/clip01.mp4").status_code),
+          (401, 401, 401))
+
+    check("User B gets 404 trying to archive or /media/-fetch User A's clip",
+          (cl_bob.post(f"/api/jobs/{j_multi['id']}/clips/clip01/archive", headers=ORIGIN_HDR).status_code,
+           cl_bob.get(f"/media/{j_multi['id']}/clip01.mp4").status_code),
+          (404, 404))
+
+    # 18g. On-demand media proxy: /media/{jid}/clip01.mp4?download=1 and anonymous /pub/{token}.mp4
+    check("archived clip01.mp4 is absent from local SSD before on-demand HTTP fetch",
+          not (Path(j_multi["dir"]) / "clips" / "clip01.mp4").exists(), True)
+    gdrive._purge_user_cache(alice.id)
+
+    r_media_dl = cl_alice.get(f"/media/{j_multi['id']}/clip01.mp4?download=1")
+    check("GET /media/{jid}/clip01.mp4?download=1 streams archived clip from Drive with exact bytes and filename",
+          (r_media_dl.status_code,
+           r_media_dl.content == c1_expected_bytes,
+           "clip01.mp4" in r_media_dl.headers.get("content-disposition", ""),
+           r_media_dl.headers.get("cache-control")),
+          (200, True, True, "private, max-age=300"))
+
+    r_cover = cl_alice.get(f"/media/{j_multi['id']}/clip01.jpg")
+    r_missing_jpg = cl_alice.get(f"/media/{j_multi['id']}/clip99.jpg")
+    r_missing_mp4 = cl_alice.get(f"/media/{j_multi['id']}/clip99.mp4")
+    r_bad_name = cl_alice.get(f"/media/{j_multi['id']}/clip01.txt")
+    check("/media/ serves local cover .jpg and returns 404 for missing or disallowed filenames",
+          (r_cover.status_code, r_missing_jpg.status_code, r_missing_mp4.status_code, r_bad_name.status_code),
+          (200, 404, 404, 404))
+
+    # Evict local cache again so anonymous /pub/{signed_token}.mp4 must also fetch on demand from Google Drive
+    gdrive._purge_user_cache(alice.id)
+    with ctx.as_user(alice.id):
+        signed_pub_url = accounts.clip_link(j_multi["id"], "clip01.mp4")
+        missing_pub_url = accounts.clip_link(j_multi["id"], "clip99.mp4")
+    pub_path = urlparse(signed_pub_url).path
+    missing_pub_path = urlparse(missing_pub_url).path
+
+    r_pub = cl_anon.get(pub_path)
+    r_pub_404 = cl_anon.get(missing_pub_path)
+    check("anonymous GET /pub/{signed_token}.mp4 streams archived clip from Drive with exact bytes",
+          (r_pub.status_code,
+           r_pub.content == c1_expected_bytes,
+           r_pub.headers.get("content-type", "").startswith("video/mp4"),
+           r_pub.headers.get("cache-control"),
+           r_pub_404.status_code),
+          (200, True, True, "private, no-store", 404))
+
     print("ALL PASSED" if not fails else f"{len(fails)} failed")
 finally:
     db.engine.dispose()

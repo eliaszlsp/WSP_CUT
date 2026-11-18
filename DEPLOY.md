@@ -42,15 +42,16 @@ them in `.env`, see `.env.example`). The redirect address to register is shown i
 
 Instagram and TikTok only accept https redirect addresses.
 
-## Google setup (sign-in and YouTube)
+## Google setup (sign-in, YouTube and Google Drive)
 
 In Google Cloud, create an OAuth client of type **Web application** with these redirect URIs:
 
 - `https://your-domain/auth/google/callback`
 - `https://your-domain/oauth/youtube/callback`
+- `https://your-domain/oauth/gdrive/callback`
 
-Enable **YouTube Data API v3** in the same project. Posting publicly to YouTube needs Google's API audit;
-until then uploads from the API stay private.
+Enable **YouTube Data API v3** (and **Google Drive API** if people archive clips to Google Drive) in the same project.
+Posting publicly to YouTube needs Google's API audit; until then uploads from the API stay private.
 
 ## Email
 
