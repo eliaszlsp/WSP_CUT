@@ -1547,9 +1547,25 @@ def apps_get(request: Request):
 def apps_put(request: Request, body: dict = Body(...)):
     _admin(request)
     try:
-        return accounts.save_app(str(body.get("platform", "")), body.get("client_id"), body.get("client_secret"))
+        return accounts.save_app(
+            str(body.get("platform", "")),
+            body.get("client_id"),
+            body.get("client_secret"),
+            mode=body.get("mode", ""),
+            config_id=body.get("config_id", ""),
+        )
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+@app.post("/api/accounts/instagram/token")
+def instagram_token_add(body: dict = Body(...)):
+    _throttle("igtok:" + ctx.uid(), 20, 600)
+    try:
+        acc = accounts.instagram_add(body.get("token", ""))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, safe.friendly(e, 240))
+    return {"id": acc["id"], "platform": acc["platform"], "name": acc["name"], "detail": acc.get("detail", "")}
 
 
 @app.post("/api/posts")

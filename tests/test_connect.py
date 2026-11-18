@@ -187,6 +187,50 @@ with ctx.as_user(user.id):
     accounts._tt_token(accounts.get(ttacc["id"]))
     check("TikTok: an old sign-in is renewed, and the new refresh token kept", accounts.get(ttacc["id"])["refresh_token"], "tt-refresh-2")
 
+# ---- Instagram Unified Login (Facebook Graph API v21.0 + direct token)
+def _fb_get(url, params=None, headers=None, timeout=None):
+    calls.append(("GET", url, params, headers or {}))
+    if url == "https://graph.instagram.com/me":
+        return R(400, {"error": {"message": "Invalid OAuth access token"}})
+    if url == "https://graph.facebook.com/v21.0/oauth/access_token":
+        return R(200, {"access_token": "fb-long-token", "token_type": "bearer", "expires_in": 5183944})
+    if url == "https://graph.facebook.com/v21.0/me/accounts":
+        return R(200, {"data": [{"id": "page1", "name": "Vice Loop Page",
+                                 "instagram_business_account": {"id": "17841999", "username": "viceloop.ig"}}]})
+    if url == "https://graph.facebook.com/v21.0/fb_box1":
+        return R(200, {"status_code": "FINISHED"})
+    if url == "https://graph.facebook.com/v21.0/fb_media1":
+        return R(200, {"permalink": "https://www.instagram.com/reel/fb_abc/"})
+    return get(url, params=params, headers=headers, timeout=timeout)
+
+def _fb_post(url, data=None, json=None, headers=None, params=None, timeout=None, content=None):
+    calls.append(("POST", url, data or json, headers or {}))
+    if url == "https://graph.facebook.com/v21.0/17841999/media":
+        return R(200, {"id": "fb_box1"})
+    if url == "https://graph.facebook.com/v21.0/17841999/media_publish":
+        return R(200, {"id": "fb_media1"})
+    return post(url, data=data, json=json, headers=headers, params=params, timeout=timeout, content=content)
+
+accounts.httpx.get, accounts.httpx.post = _fb_get, _fb_post
+r = b.post("/api/accounts/instagram/token", json={"token": "EAA-unified-token"}, headers=ORIGIN)
+check("Instagram Unified token endpoint saves linked IG business account", (r.status_code, r.json().get("name")), (200, "@viceloop.ig"))
+check("Cross-site Instagram token post refused", b.post("/api/accounts/instagram/token", json={"token": "EAA-x"}, headers={"Origin": "https://evil.example"}).status_code, 403)
+with ctx.as_user(user.id):
+    ig_fb = accounts.get("ig_17841999")
+    check("Instagram Unified account marks api=fb", ig_fb and ig_fb.get("api"), "fb")
+    calls.clear()
+    rid, url = accounts.instagram_upload(ig_fb, jd / "clip01.mp4", "Unified caption", "job-12345678")
+    made = next(c for c in calls if c[1].endswith("/17841999/media"))
+    check("Instagram Unified upload uses graph.facebook.com/v21.0", (made[1].startswith("https://graph.facebook.com/v21.0/"), rid, url),
+          (True, "fb_media1", "https://www.instagram.com/reel/fb_abc/"))
+
+r = a.put("/api/apps", json={"platform": "instagram", "client_id": "1156806473553148", "client_secret": "fb-app-secret", "mode": "fb", "config_id": "cfg_999"}, headers=ORIGIN)
+check("Admin can save Instagram Unified Login mode + config_id", (r.status_code, r.json()["instagram"].get("mode"), r.json()["instagram"].get("config_id")), (200, "fb", "cfg_999"))
+loc, back = connect(b, "instagram", "fbcode123")
+q = parse_qs(loc.query)
+check("Instagram Unified OAuth redirects to facebook.com with config_id", (loc.netloc, q.get("config_id", [None])[0]), ("www.facebook.com", "cfg_999"))
+check("Instagram Unified OAuth callback connects @viceloop.ig", "connected=instagram" in back.headers["location"])
+
 print("ALL PASSED" if not fails else f"{len(fails)} failed")
 import shutil; db.engine.dispose(); shutil.rmtree(os.environ["PEAKCUT_DATA"], ignore_errors=True)
 sys.exit(1 if fails else 0)
