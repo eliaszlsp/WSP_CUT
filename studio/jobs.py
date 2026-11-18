@@ -385,11 +385,15 @@ def request_render(jid, cid, changes: dict):
         new["layout"] = DEFAULTS["layout"]
     has_clip_src = bool(clip.get("src") and Path(clip["src"]).is_file())
     has_job_src = bool(job.get("source_path") and Path(job["source_path"]).is_file())
-    has_url_src = (job.get("source") or {}).get("type") == "url" and bool((job.get("source") or {}).get("url"))
-    was_cleaned = bool(
-        clip.get("drive")
+    has_url_src = (
+        job.get("kind") != "live"
+        and (job.get("source") or {}).get("type") == "url"
+        and bool((job.get("source") or {}).get("url"))
+    )
+    was_cleaned = (
+        bool(clip.get("drive"))
         or any(c.get("drive") for c in job.get("clips", []))
-        or (not job.get("source_path") and not (job.get("source") or {}).get("path"))
+        or (job.get("source_path") == "" and "source_path" in job)
     )
     if was_cleaned and not (has_clip_src or has_job_src or has_url_src):
         raise ValueError(

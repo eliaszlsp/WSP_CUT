@@ -1185,6 +1185,134 @@ try:
            not del_cache.exists()),
           (True, True, True, True, True, True))
 
+    # ---- 16. Hardening: deleted-account queued/in-flight items, Windows unlink OSError retry, live re-render guard, sweep_all & start()
+    del_q_user, _ = auth._create("delqueue@example.com", "delqueue", password_hash="x")
+    with ctx.as_user(del_q_user.id):
+        state_mock["email"] = "delqueue@example.com"
+        s_dq = parse_qs(urlparse(gdrive.connect_url()).query)["state"][0]
+        gdrive.connect_finish("code-dq", s_dq)
+        j_dq = jobs.create({"type": "file", "path": "", "name": "dq.mp4"}, {}, enqueue=False)
+        dq_clips = Path(j_dq["dir"]) / "clips"
+        dq_clips.mkdir(parents=True, exist_ok=True)
+        (dq_clips / "clip01.mp4").write_bytes(b"DQ_CLIP_BYTES" * 80)
+        j_dq["clips"].append({"id": "clip01", "status": "done", "file": "clip01.mp4", "title": "DQ", "start": 0.0, "end": 10.0, "version": 1})
+        j_dq["status"] = "done"
+        jobs.save(j_dq)
+        check("queued clip for soon-to-be-deleted user", gdrive.enqueue_clip(del_q_user.id, j_dq["id"], "clip01", manual=True), True)
+
+    dq_udir = config.user_dir(del_q_user.id)
+    check("delete_account succeeds with clip queued in gdrive._queue", account.delete_account(del_q_user.id).get("ok"), True)
+    state_mock["put_fail_text"] = "500 simulated failure for deleted user"
+    gdrive.drain_queue()
+    res_orphan = gdrive.archive_one(del_q_user.id, j_dq["id"], "clip01", manual=True)
+    state_mock["put_fail_text"] = None
+    check("deleted account never resurrects user_dir, _mem, or _retries from queued or in-flight archive",
+          (res_orphan,
+           not dq_udir.exists(),
+           del_q_user.id not in gdrive._mem,
+           all(k[0] != del_q_user.id for k in gdrive._retries)),
+          ("skipped", True, True, True))
+
+    with ctx.as_user(alice.id):
+        # Windows OSError on source.mp4 unlink: preserve source_path until unlink succeeds on next sweep
+        j_win = jobs.create({"type": "file", "path": "", "name": "locked.mp4"}, {}, enqueue=False)
+        j_win_dir = Path(j_win["dir"])
+        locked_src = j_win_dir / "source.mp4"
+        locked_src.write_bytes(b"LOCKED_WINDOWS_SOURCE" * 200)
+        j_win["source_path"] = str(locked_src)
+        j_win["source"]["path"] = str(locked_src)
+        j_win["clips"] = [{"id": "clip01", "status": "done", "file": "clip01.mp4", "drive": {"id": "drv_locked", "size": 100, "url": "u", "at": time.time()}}]
+        j_win["status"] = "done"
+        jobs.save(j_win)
+
+        orig_path_unlink = Path.unlink
+
+        def win_locked_unlink(self, missing_ok=False):
+            if self.resolve() == locked_src.resolve():
+                raise PermissionError("WinError 32: file is being used by another process")
+            return orig_path_unlink(self, missing_ok=missing_ok)
+
+        Path.unlink = win_locked_unlink
+        try:
+            freed_locked = gdrive.clean_job_source(jobs.get(j_win["id"]))
+        finally:
+            Path.unlink = orig_path_unlink
+
+        check("clean_job_source keeps source_path intact when unlink fails with PermissionError",
+              (freed_locked,
+               locked_src.is_file(),
+               jobs.get(j_win["id"])["source_path"] == str(locked_src),
+               jobs.get(j_win["id"])["source"]["path"] == str(locked_src)),
+              (False, True, True, True))
+
+        freed_unlocked = gdrive.clean_job_source(jobs.get(j_win["id"]))
+        check("subsequent clean_job_source unlinks file and clears source_path once unlocked",
+              (freed_unlocked,
+               not locked_src.exists(),
+               jobs.get(j_win["id"])["source_path"] == "",
+               jobs.get(j_win["id"])["source"]["path"] == ""),
+              (True, True, True, True))
+
+        # Live stream job (kind='live', source.type='url') cannot re-fetch from URL after archive removes clip01.src.ts
+        j_live = jobs.create({"type": "url", "url": "https://twitch.tv/progamer", "name": "Live Stream"}, {}, enqueue=False, kind="live")
+        jl_clips = Path(j_live["dir"]) / "clips"
+        jl_clips.mkdir(parents=True, exist_ok=True)
+        (jl_clips / "clip01.mp4").write_bytes(b"LIVE_MP4_DATA" * 100)
+        jl_piece = jl_clips / "clip01.src.ts"
+        jl_piece.write_bytes(b"LIVE_TS_PIECE" * 100)
+        j_live["clips"].append({
+            "id": "clip01", "status": "done", "file": "clip01.mp4", "title": "Live Clutch",
+            "hook": "LIVE", "description": "", "hashtags": [], "score": 95,
+            "start": 5.0, "end": 20.0, "src": str(jl_piece), "src_offset": 0.0, "src_end": 30.0, "version": 1,
+        })
+        j_live["status"] = "done"
+        jobs.save(j_live)
+
+        check("live clip archives cleanly and unlinks .src.ts",
+              (gdrive.archive_one(alice.id, j_live["id"], "clip01", manual=True), not jl_piece.exists()),
+              ("archived", True))
+        try:
+            jobs.request_render(j_live["id"], "clip01", {"hook": "EDIT LIVE"})
+            check("archived live clip without .src.ts raises friendly ValueError on request_render", False)
+        except ValueError as e:
+            check("archived live clip without .src.ts raises friendly ValueError on request_render",
+                  "archived to google drive" in str(e).lower() and "cannot be re-made" in str(e).lower())
+
+        # sweep_all() across auth.user_ids() + start() background worker processing _queue
+        now_all = time.time()
+        j_sw_all = jobs.create({"type": "file", "path": "", "name": "swall.mp4"}, {}, enqueue=False)
+        jsa_clips = Path(j_sw_all["dir"]) / "clips"
+        jsa_clips.mkdir(parents=True, exist_ok=True)
+        (jsa_clips / "clip01.mp4").write_bytes(b"SWEEP_ALL_BYTES" * 90)
+        j_sw_all["created"] = now_all - 5 * 86400
+        j_sw_all["clips"].append({
+            "id": "clip01", "status": "done", "file": "clip01.mp4", "title": "SweepAll Clip",
+            "start": 0.0, "end": 12.0, "version": 1, "made_at": now_all - 5 * 86400,
+        })
+        j_sw_all["status"] = "done"
+        jobs.save(j_sw_all)
+
+        sw_all_res = gdrive.sweep_all(now=now_all)
+        check("sweep_all queues eligible old clip across active users", sw_all_res["queued"] >= 1, True)
+
+        gdrive.start()
+        threads_after_first = sum(1 for t in threading.enumerate() if t.name in ("gdrive-worker", "gdrive-sweep"))
+        gdrive.start()
+        threads_after_second = sum(1 for t in threading.enumerate() if t.name in ("gdrive-worker", "gdrive-sweep"))
+        check("gdrive.start() is idempotent and spawns worker + sweep daemon threads once",
+              (threads_after_first, threads_after_second), (2, 2))
+
+        deadline_w = time.monotonic() + 5.0
+        while time.monotonic() < deadline_w:
+            if jobs.get(j_sw_all["id"])["clips"][0].get("drive") and gdrive.queued_for_me() == 0:
+                break
+            time.sleep(0.02)
+        check("background _worker_loop processes queued archive automatically without manual drain_queue",
+              (bool(jobs.get(j_sw_all["id"])["clips"][0].get("drive")),
+               not (jsa_clips / "clip01.mp4").exists(),
+               gdrive.queued_for_me() == 0),
+              (True, True, True))
+
     print("ALL PASSED" if not fails else f"{len(fails)} failed")
 finally:
     db.engine.dispose()

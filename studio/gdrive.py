@@ -55,9 +55,10 @@ class FolderGone(RuntimeError):
     """Raised when a cached Google Drive folder was deleted or moved to Trash."""
 
 
-def _file() -> Path:
+def _file(create: bool = False) -> Path:
     d = config.user_dir(ctx.uid()) / "accounts"
-    d.mkdir(parents=True, exist_ok=True)
+    if create:
+        d.mkdir(parents=True, exist_ok=True)
     return d / "gdrive.json"
 
 
@@ -115,7 +116,9 @@ def _cfg() -> dict:
     u = ctx.uid()
     with _lock:
         if u not in _mem:
-            f = _file()
+            if not config.user_dir(u).exists():
+                return _copy_cfg({})
+            f = _file(create=False)
             loaded = {}
             if f.is_file():
                 try:
@@ -132,7 +135,7 @@ def _save(cfg: dict) -> dict:
     u = ctx.uid()
     clean = _copy_cfg(cfg)
     with _lock:
-        f = _file()
+        f = _file(create=True)
         tmp = f.with_name("gdrive.json.tmp")
         tmp.write_text(json.dumps(clean, indent=1), encoding="utf-8")
         try:
@@ -181,6 +184,15 @@ def _purge_user_cache(uid: str):
 
 def forget(uid: str):
     """Remove all in-memory state, pending OAuth tokens, queue entries and cached clips for a deleted user."""
+    with _queue.mutex:
+        kept = [it for it in _queue.queue if it[0] != uid]
+        removed_q = len(_queue.queue) - len(kept)
+        if removed_q:
+            _queue.queue.clear()
+            _queue.queue.extend(kept)
+            _queue.unfinished_tasks = max(0, _queue.unfinished_tasks - removed_q)
+            if _queue.unfinished_tasks == 0:
+                _queue.all_tasks_done.notify_all()
     with _lock:
         _mem.pop(uid, None)
         for k in [k for k, v in list(_states.items()) if v[0] == uid]:
@@ -922,6 +934,7 @@ def clean_job_source(job: dict, now: float = None, auto_days: int = 0) -> bool:
 
     jdir_res = Path(target["dir"]).resolve()
     freed = False
+    still_locked = set()
     seen = set()
     for raw_p in (sp1, sp2):
         if not raw_p:
@@ -943,13 +956,15 @@ def clean_job_source(job: dict, now: float = None, auto_days: int = 0) -> bool:
                     freed = True
             except OSError:
                 pass
+            if p.exists():
+                still_locked.add(s)
 
     with jobs._lock:
         changed = False
-        if target.get("source_path"):
+        if sp1 and str(sp1) not in still_locked and target.get("source_path"):
             target["source_path"] = ""
             changed = True
-        if isinstance(target.get("source"), dict) and target["source"].get("path"):
+        if sp2 and str(sp2) not in still_locked and isinstance(target.get("source"), dict) and target["source"].get("path"):
             target["source"]["path"] = ""
             changed = True
         if job is not target:
@@ -967,12 +982,18 @@ def archive_one(uid: str, jid: str, cid: str, manual: bool = False) -> str:
     key = (uid, jid, cid)
     try:
         with _key_lock(f"arch:{uid}:{jid}:{cid}"), ctx.as_user(uid):
-            cfg = _cfg()
+            if not config.user_dir(uid).exists():
+                return "skipped"
             job = jobs.get(jid)
-            clip = next((c for c in (job or {}).get("clips", []) if c.get("id") == cid), None)
+            if not job:
+                with _lock:
+                    _retries.pop(key, None)
+                    _attempts.pop(key, None)
+                return "skipped"
+            clip = next((c for c in job.get("clips", []) if c.get("id") == cid), None)
+            cfg = _cfg()
             if (
                 not (cfg["connected"] and cfg["refresh_token"])
-                or not job
                 or not clip
                 or clip.get("status") != "done"
                 or clip.get("drive")
@@ -1010,23 +1031,25 @@ def archive_one(uid: str, jid: str, cid: str, manual: bool = False) -> str:
                     fid = folder_for(cfg, creator_name, ts=ts)
                     info = upload_mp4(cfg, local, fid, remote_name)
             except Exception as e:  # noqa: BLE001
+                if not config.user_dir(uid).exists() or jobs.get(jid) is None:
+                    return "skipped"
                 err = _redact(str(e), cfg)[:260]
                 notify_exhausted = False
                 with _lock:
                     live = _cfg()
-                    if live.get("connected") and live.get("refresh_token"):
+                    if live.get("connected") and live.get("refresh_token") and jobs.get(jid) is not None:
                         live["last_error"] = err
                         _save(live)
-                    prev_tries = _retries.get(key, (_attempts.get(key, 0),))[0]
-                    tries = prev_tries + 1
-                    if tries < 3:
-                        _attempts[key] = tries
-                        _retries[key] = (tries, time.time() + 600, bool(manual))
-                    else:
-                        _retries.pop(key, None)
-                        _attempts.pop(key, None)
-                        _exhausted.add(key)
-                        notify_exhausted = True
+                        prev_tries = _retries.get(key, (_attempts.get(key, 0),))[0]
+                        tries = prev_tries + 1
+                        if tries < 3:
+                            _attempts[key] = tries
+                            _retries[key] = (tries, time.time() + 600, bool(manual))
+                        else:
+                            _retries.pop(key, None)
+                            _attempts.pop(key, None)
+                            _exhausted.add(key)
+                            notify_exhausted = True
                 if notify_exhausted:
                     alerts.notify(
                         f"Google Drive archive failed ({clip.get('title') or cid}): {err[:160]}",
@@ -1038,7 +1061,8 @@ def archive_one(uid: str, jid: str, cid: str, manual: bool = False) -> str:
 
             with jobs._lock:
                 if (
-                    jobs.get(jid) is not job
+                    not config.user_dir(uid).exists()
+                    or jobs.get(jid) is not job
                     or clip not in job.get("clips", [])
                     or clip.get("status") != "done"
                     or clip.get("version", 0) != ver_before
@@ -1086,11 +1110,12 @@ def archive_one(uid: str, jid: str, cid: str, manual: bool = False) -> str:
                 _retries.pop(key, None)
                 _attempts.pop(key, None)
                 _exhausted.discard(key)
-                live = _cfg()
-                live["archived_count"] = _nonneg_int(live.get("archived_count")) + 1
-                live["archived_bytes"] = _nonneg_int(live.get("archived_bytes")) + _nonneg_int(info.get("size"))
-                live["last_error"] = ""
-                _save(live)
+                if config.user_dir(uid).exists() and jobs.get(jid) is job:
+                    live = _cfg()
+                    live["archived_count"] = _nonneg_int(live.get("archived_count")) + 1
+                    live["archived_bytes"] = _nonneg_int(live.get("archived_bytes")) + _nonneg_int(info.get("size"))
+                    live["last_error"] = ""
+                    _save(live)
 
             creators.log(job.get("creator"), f"Archived to Google Drive: {clip.get('title') or clip.get('hook') or cid}")
             clean_job_source(job)
