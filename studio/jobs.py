@@ -912,9 +912,12 @@ def _apply_long_and_derived(job, words, db, span, lo, game, notes, face=None):
                 long_type="block",
                 captions=False,
                 output_lang=out_lang,
+                thumb_mode=o.get("thumb_mode", "local"),
                 status="queued",
                 version=0,
             )
+            if face:
+                b["facecam"] = face
             job["clips"].append(b)
             enqueued.append(b)
             if o.get("derive_shorts", True):
@@ -979,9 +982,12 @@ def _apply_long_and_derived(job, words, db, span, lo, game, notes, face=None):
                 long_type="compile",
                 captions=False,
                 output_lang=out_lang,
+                thumb_mode=o.get("thumb_mode", "local"),
                 status="queued",
                 version=0,
             )
+            if face:
+                b["facecam"] = face
             job["clips"].append(comp)
             enqueued.append(comp)
     return enqueued, tokens, model

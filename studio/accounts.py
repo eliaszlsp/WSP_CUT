@@ -368,7 +368,8 @@ def _yt_token(acc) -> str:
     return acc["access_token"]
 
 
-def youtube_upload(acc, path: Path, title: str, description: str, tags: list, privacy: str):
+def youtube_upload(acc, path: Path, title: str, description: str, tags: list, privacy: str,
+                   is_short: bool = True, thumb_path: Path | None = None):
     token = _yt_token(acc)
     meta = {"snippet": {"title": re.sub(r"[<>]", "", title)[:100] or "Clip", "description": re.sub(r"[<>]", "", description)[:4900],
                         "tags": tags[:15], "categoryId": "20"},
@@ -378,11 +379,30 @@ def youtube_upload(acc, path: Path, title: str, description: str, tags: list, pr
                               params={"uploadType": "resumable", "part": "snippet,status"}, json=meta,
                               headers={"Authorization": f"Bearer {token}", "X-Upload-Content-Type": "video/mp4",
                                        "X-Upload-Content-Length": str(size)}, timeout=60), "Starting the YouTube upload")
-    with path.open("rb") as f:
-        done = _check(httpx.put(start.headers["Location"], content=f.read(),
-                                headers={"Authorization": f"Bearer {token}", "Content-Type": "video/mp4"}, timeout=900),
-                      "Uploading to YouTube").json()
-    return done["id"], f"https://www.youtube.com/shorts/{done['id']}"
+
+    def _stream():
+        with path.open("rb") as f:
+            while chunk := f.read(4 * 1024 * 1024):
+                yield chunk
+
+    done = _check(httpx.put(start.headers["Location"], content=_stream(),
+                            headers={"Authorization": f"Bearer {token}", "Content-Type": "video/mp4",
+                                     "Content-Length": str(size)}, timeout=1800),
+                  "Uploading to YouTube").json()
+    vid = done["id"]
+    if thumb_path and Path(thumb_path).is_file():
+        try:
+            httpx.post(
+                "https://www.googleapis.com/upload/youtube/v3/thumbnails/set",
+                params={"videoId": vid},
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "image/jpeg"},
+                content=Path(thumb_path).read_bytes(),
+                timeout=60,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    url = f"https://www.youtube.com/shorts/{vid}" if is_short else f"https://www.youtube.com/watch?v={vid}"
+    return vid, url
 
 
 def youtube_views(acc, ids: list) -> dict:

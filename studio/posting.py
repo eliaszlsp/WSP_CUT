@@ -178,10 +178,12 @@ def _post(p):
             raise RuntimeError("The clip file is no longer available.")
         creator = creators.get(job["creator"]) or dict(creators.DEFAULTS, name="clips")
         title, cap = clip.get("title") or clip.get("hook") or "Clip", _caption(clip, creator)
-        is_short = (clip.get("clip_kind") != "long") and ((clip.get("end", 0) - clip.get("start", 0)) <= 180)
+        is_short = (clip.get("clip_kind") != "long") and (clip.get("format") != "16:9") and ((clip.get("end", 0) - clip.get("start", 0)) <= 180)
         if acc["platform"] == "youtube":
             yt_desc = (cap + "\n\n#Shorts") if is_short else cap
-            rid, url = accounts.youtube_upload(acc, path, title, yt_desc, clip.get("hashtags", []), creator["privacy"], is_short=is_short)
+            thumb_path = (Path(job["dir"]) / "clips" / Path(str(clip.get("cover") or "")).name) if (not is_short and clip.get("cover")) else None
+            rid, url = accounts.youtube_upload(acc, path, title, yt_desc, clip.get("hashtags", []), creator["privacy"],
+                                               is_short=is_short, thumb_path=thumb_path)
         elif acc["platform"] == "instagram":
             rid, url = accounts.instagram_upload(acc, path, f"{title}\n\n{cap}", job["id"] if fname else "", clip_name=fname)
         elif acc["platform"] == "tiktok":

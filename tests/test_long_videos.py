@@ -454,5 +454,163 @@ with ctx.as_user(UID):
     sess._finalize_long()
     check("live.Session._finalize_long handles pruned segments without error", True, True)
 
+# ---- 7. Task 3: studio/thumbs.py, accounts.youtube_upload, posting._post ----
+from PIL import Image  # noqa: E402
+from studio import ai, thumbs  # noqa: E402
+
+thumb_dir = TMP_DIR / "thumbs_test"
+thumb_dir.mkdir(parents=True, exist_ok=True)
+
+th_local = thumb_dir / "local.jpg"
+out_th1 = thumbs.generate(syn_src, th_local, peak_t=1.0, text="VIRADA ÉPICA NO FINAL", mode="local")
+check("thumbs.generate returns output path", out_th1, th_local)
+check("thumbs.generate creates local jpeg", th_local.is_file(), True)
+if th_local.is_file():
+    with Image.open(th_local) as im:
+        check("thumbs.generate local size is 1280x720", im.size, (1280, 720))
+        check("thumbs.generate local format is JPEG", im.format, "JPEG")
+
+th_face = thumb_dir / "facecam.jpg"
+thumbs.generate(syn_src, th_face, peak_t=0.8, text="CLUTCH INSANO", facecam=[20, 20, 200, 150], mode="local")
+check("thumbs.generate with facecam creates jpeg", th_face.is_file(), True)
+if th_face.is_file():
+    with Image.open(th_face) as im:
+        check("thumbs.generate facecam size is 1280x720", im.size, (1280, 720))
+
+th_ai_fb = thumb_dir / "ai_fallback.jpg"
+with patch.object(ai, "ready", return_value=True), \
+     patch.object(ai, "provider", return_value="gemini"), \
+     patch.object(ai, "current", return_value={"provider": "gemini", "models": ["gemini-2.5-flash"], "base_url": "", "key": "test-key"}), \
+     patch("httpx.post", side_effect=RuntimeError("network down")):
+    thumbs.generate(syn_src, th_ai_fb, peak_t=0.5, text="FALLBACK TESTE", mode="ai")
+check("thumbs.generate mode='ai' falls back gracefully on error", th_ai_fb.is_file(), True)
+if th_ai_fb.is_file():
+    with Image.open(th_ai_fb) as im:
+        check("thumbs.generate ai fallback size is 1280x720", im.size, (1280, 720))
+
+# render.render_clip 16:9 produces 1280x720 thumbnail cover
+if jpg_16_9.is_file():
+    with Image.open(jpg_16_9) as im:
+        check("render_clip 16:9 cover is 1280x720", im.size, (1280, 720))
+
+# accounts.youtube_upload: is_short=False + thumbnails/set + 403 tolerance
+class _FakeResp:
+    def __init__(self, status_code=200, data=None, headers=None):
+        self.status_code = status_code
+        self._data = data or {}
+        self.headers = headers or {}
+        self.text = str(self._data)
+
+    def json(self):
+        return self._data
+
+
+yt_dummy_mp4 = thumb_dir / "vid.mp4"
+yt_dummy_mp4.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+yt_acc = {"id": "yt_test", "platform": "youtube", "name": "YT Test", "access_token": "tok", "expires": time.time() + 3600}
+
+post_urls = []
+
+
+def _fake_yt_post(url, **kwargs):
+    post_urls.append(url)
+    if "thumbnails/set" in url:
+        return _FakeResp(200, {"items": [{"default": {"url": "ok"}}]})
+    return _FakeResp(200, {}, headers={"Location": "https://upload.example/1"})
+
+
+with patch.object(accounts.httpx, "post", side_effect=_fake_yt_post), \
+     patch.object(accounts.httpx, "put", return_value=_FakeResp(200, {"id": "VID123"})):
+    vid, vurl = accounts.youtube_upload(yt_acc, yt_dummy_mp4, "Long Title", "Desc", ["tag"], "public", is_short=False, thumb_path=th_local)
+    check("youtube_upload is_short=False returns watch URL", vurl, "https://www.youtube.com/watch?v=VID123")
+    check("youtube_upload calls thumbnails/set", any("thumbnails/set" in u for u in post_urls), True)
+
+# 403 on thumbnails/set must not fail upload
+def _fake_yt_post_403(url, **kwargs):
+    if "thumbnails/set" in url:
+        return _FakeResp(403, {"error": {"message": "forbidden"}})
+    return _FakeResp(200, {}, headers={"Location": "https://upload.example/2"})
+
+
+with patch.object(accounts.httpx, "post", side_effect=_fake_yt_post_403), \
+     patch.object(accounts.httpx, "put", return_value=_FakeResp(200, {"id": "VID403"})):
+    vid403, vurl403 = accounts.youtube_upload(yt_acc, yt_dummy_mp4, "Long Title", "Desc", ["tag"], "public", is_short=False, thumb_path=th_local)
+    check("youtube_upload ignores 403 on thumbnails/set", (vid403, vurl403), ("VID403", "https://www.youtube.com/watch?v=VID403"))
+
+# posting._post routing for 16:9 long vs 9:16 Shorts
+with ctx.as_user(UID):
+    c_route = creators.create({"name": "Route Creator", "privacy": "public", "accounts": ["yt_r", "tt_r", "ig_r"]})
+    j_route = jobs.create({"type": "file", "name": "vod_route.mp4"}, {}, enqueue=False, creator=c_route["id"])
+    clips_dir = Path(j_route["dir"]) / "clips"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    (clips_dir / "long_r.mp4").write_bytes(b"mp4")
+    (clips_dir / "long_r.jpg").write_bytes(b"jpg")
+    (clips_dir / "short_r.mp4").write_bytes(b"mp4")
+    (clips_dir / "short_r.jpg").write_bytes(b"jpg")
+    j_route["clips"] = [
+        {"id": "long_r", "start": 0.0, "end": 900.0, "format": "16:9", "clip_kind": "long", "file": "long_r.mp4", "cover": "long_r.jpg", "title": "Long Ep", "hashtags": ["gg"], "status": "done"},
+        {"id": "short_r", "start": 0.0, "end": 45.0, "format": "9:16", "file": "short_r.mp4", "cover": "short_r.jpg", "title": "Short Ep", "hashtags": ["gg"], "status": "done"},
+    ]
+    jobs.save(j_route)
+
+    route_accs = {
+        "yt_r": {"id": "yt_r", "platform": "youtube", "name": "YT R"},
+        "tt_r": {"id": "tt_r", "platform": "tiktok", "name": "TT R"},
+        "ig_r": {"id": "ig_r", "platform": "instagram", "name": "IG R"},
+    }
+    yt_calls, tt_calls, ig_calls = [], [], []
+    with patch.object(accounts, "get", side_effect=lambda aid: route_accs.get(aid)), \
+         patch.object(accounts, "youtube_upload", side_effect=lambda *a, **kw: (yt_calls.append((a, kw)), ("yt1", "https://youtu.be/yt1"))[1]), \
+         patch.object(accounts, "tiktok_upload", side_effect=lambda *a, **kw: (tt_calls.append((a, kw)), ("tt1", "https://tiktok.com/1"))[1]), \
+         patch.object(accounts, "instagram_upload", side_effect=lambda *a, **kw: (ig_calls.append((a, kw)), ("ig1", "https://instagram.com/1"))[1]):
+        p_long = {"id": "plong", "user": UID, "job": j_route["id"], "clip": "long_r", "creator": c_route["id"], "account": "yt_r", "account_name": "YT R", "platform": "youtube", "status": "scheduled", "tries": 0, "title": "Long Ep"}
+        posting._post(p_long)
+        check("posting._post long 16:9 status posted", p_long["status"], "posted")
+        check("posting._post long 16:9 passes is_short=False", yt_calls[-1][1].get("is_short"), False)
+        check("posting._post long 16:9 passes thumb_path", yt_calls[-1][1].get("thumb_path"), clips_dir / "long_r.jpg")
+
+        p_sy = {"id": "psy", "user": UID, "job": j_route["id"], "clip": "short_r", "creator": c_route["id"], "account": "yt_r", "account_name": "YT R", "platform": "youtube", "status": "scheduled", "tries": 0, "title": "Short Ep"}
+        p_st = {"id": "pst", "user": UID, "job": j_route["id"], "clip": "short_r", "creator": c_route["id"], "account": "tt_r", "account_name": "TT R", "platform": "tiktok", "status": "scheduled", "tries": 0, "title": "Short Ep"}
+        p_si = {"id": "psi", "user": UID, "job": j_route["id"], "clip": "short_r", "creator": c_route["id"], "account": "ig_r", "account_name": "IG R", "platform": "instagram", "status": "scheduled", "tries": 0, "title": "Short Ep"}
+        posting._post(p_sy)
+        posting._post(p_st)
+        posting._post(p_si)
+        check("posting._post short 9:16 passes is_short=True", yt_calls[-1][1].get("is_short"), True)
+        check("posting._post short 9:16 passes thumb_path=None", yt_calls[-1][1].get("thumb_path"), None)
+        check("posting._post short 9:16 posts to TikTok", len(tt_calls), 1)
+        check("posting._post short 9:16 posts to Instagram", len(ig_calls), 1)
+
+# ---- 8. Task 4: UI controls, priority badges & JS syntax ----
+import re  # noqa: E402
+
+html_path = ROOT / "web" / "index.html"
+html_text = html_path.read_text(encoding="utf-8")
+
+for needle in (
+    'data-k="long_mode"',
+    'data-k="long_min_len"',
+    'data-k="long_max_len"',
+    'data-k="derive_shorts"',
+    'data-k="thumb_mode"',
+    'data-k="long_enabled"',
+    'data-k="series_enabled"',
+    'data-f="thumb_text"',
+    'Derived Short',
+    '16:9 videos post to YouTube only',
+    'P1 · 16:9',
+    'P2 · Derived',
+):
+    check(f"UI contains {needle}", needle in html_text, True)
+
+check("UI has zero box-shadow", "box-shadow" not in html_text, True)
+
+scripts = re.findall(r"<script[^>]*>(.*?)</script>", html_text, re.DOTALL)
+check("UI has inline script block", len(scripts) >= 1, True)
+if scripts:
+    js_tmp = TMP_DIR / "ui_check.js"
+    js_tmp.write_text("\n".join(scripts), encoding="utf-8")
+    node_res = subprocess.run(["node", "--check", str(js_tmp)], capture_output=True, text=True)
+    check("UI JS passes node --check", node_res.returncode, 0)
+
 print(f"\nSummary: {len(fails)} failed" if fails else "\nALL PASSED")
 sys.exit(1 if fails else 0)

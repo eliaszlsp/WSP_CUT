@@ -6,7 +6,7 @@ import tempfile
 import unicodedata
 from pathlib import Path
 
-from . import config, roman
+from . import config, roman, thumbs
 from .media import NO_WINDOW, run
 
 W, H = config.OUT_W, config.OUT_H
@@ -294,6 +294,25 @@ def _encode_cmd(work: Path, base: list, out_file: str, enc_timeout: int):
     raise RuntimeError(f"Render failed: {err}")
 
 
+def _scaled_facecam(face, src_w: int, src_h: int):
+    if not face or len(face) != 4 or not src_w or not src_h:
+        return None
+    sx, sy = 1920.0 / src_w, 1080.0 / src_h
+    return [round(face[0] * sx), round(face[1] * sy), round(face[2] * sx), round(face[3] * sy)]
+
+
+def _thumb_for_long(out_dir: Path, name: str, clip: dict, peak_t: float, src_w: int, src_h: int):
+    out_mp4 = out_dir / f"{name}.mp4"
+    thumbs.generate(
+        out_mp4,
+        out_dir / f"{name}.jpg",
+        peak_t=peak_t,
+        text=clip.get("thumb_text") or clip.get("hook") or clip.get("title") or "",
+        facecam=_scaled_facecam(clip.get("facecam"), src_w, src_h),
+        mode=clip.get("thumb_mode") or "local",
+    )
+
+
 def render_compilation(src: Path, out_dir: Path, name: str, clip: dict, src_w: int, src_h: int) -> dict:
     """Concatenate multiple highlight segments into a single 1920x1080 16:9 MP4 normalized to -14 LUFS."""
     segments = clip.get("segments") or []
@@ -336,6 +355,7 @@ def render_compilation(src: Path, out_dir: Path, name: str, clip: dict, src_w: i
             f = work / f"{name}.{ext}"
             if f.exists():
                 shutil.move(str(f), str(out_dir / f"{name}.{ext}"))
+        _thumb_for_long(out_dir, name, clip, cover_t, src_w, src_h)
         return {"file": f"{name}.mp4", "cover": f"{name}.jpg", "layout": "horizontal"}
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -372,7 +392,15 @@ def render_clip(src: Path, out_dir: Path, name: str, clip: dict, words: list, sr
         tbase.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="pk", dir=str(tbase) if tbase else None))
     try:
-        return _render_in(work, src, out_dir, name, start, end, layout, fg_h, ass, face=face, peak_t=clip.get("peak_t"))
+        res = _render_in(work, src, out_dir, name, start, end, layout, fg_h, ass, face=face, peak_t=clip.get("peak_t"))
+        if is_16_9 or clip.get("clip_kind") == "long":
+            pt = clip.get("peak_t")
+            if pt is not None and start <= float(pt) <= end:
+                local_peak_t = max(0.0, min(max(0.0, (end - start) - 0.1), float(pt) - start))
+            else:
+                local_peak_t = min(1.2, (end - start) / 2)
+            _thumb_for_long(out_dir, name, clip, local_peak_t, src_w, src_h)
+        return res
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
