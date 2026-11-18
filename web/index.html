@@ -2283,7 +2283,18 @@ async function drawSettings() {
                 <div class="row"><button class="btn primary" data-act="storsave">Use this folder</button><button class="btn ghost" data-act="storchange">Cancel</button></div></div>`
             : `<div class="row" style="margin-top:16px"><button class="btn" data-act="storchange">Change folder</button></div>`}</section>`;
       }
-      const gd = S.gd = await api("/api/gdrive");
+      let gd = null, gdStale = false;
+      try {
+        gd = S.gd = await api("/api/gdrive");
+      } catch (e) {
+        if (/not found|404/i.test(String(e?.message || ""))) gdStale = true;
+        else throw e;
+      }
+      if (gdStale) {
+        body.innerHTML = localSec + `<section class="set-sec"><h2>Google Drive archive</h2>
+          <div class="ai-alert warn" role="alert"><div class="ai-alert-top"><span><b>Restart PeakCut's server to enable Google Drive archive:</b> this page loaded the updated interface, but the Python server running in the background is still on the previous version. Restart <code>python -m studio.server</code> — any active live recording automatically reconnects within seconds.</span></div></div></section>`;
+        return;
+      }
       S.status.gdrive = {ready: gd.ready, connected: gd.connected, queued: gd.queued || 0};
       const apps = admin && S.gdSetupOpen ? await api("/api/apps").catch(() => null) : null;
       const gapp = apps?.youtube;
