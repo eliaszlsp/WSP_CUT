@@ -200,6 +200,20 @@ check("/api/status exposes languages map and default_lang",
       (st_json.get("languages"), st_json.get("default_lang")),
       ({"pt": "Português (BR)", "source": "Same as spoken", "en": "English"}, "pt"))
 
+# ---- Task 3: UI output language selectors in Composer, Creator Setup & Clip Editor + HTTP persistence
+ORIGIN = {"Origin": "http://127.0.0.1:8765"}
+r_cr = client.post("/api/creators", json={"name": "ViceLoopBR", "channel": ""}, headers=ORIGIN)
+cid_http = r_cr.json().get("id")
+r_put_cr = client.put(f"/api/creators/{cid_http}", json={"output_lang": "source"}, headers=ORIGIN)
+sync_cr = next((x for x in client.get("/api/sync").json().get("creators", []) if x["id"] == cid_http), {})
+check("HTTP creator PUT and /api/sync persist output_lang",
+      (r_put_cr.status_code, sync_cr.get("output_lang")), (200, "source"))
+
+app_html = client.get("/app").text
+check("dashboard includes output language selector in Composer, Creator Setup and Clip Editor",
+      all(tok in app_html for tok in ('id="o_lang"', 'data-seg="o_lang"', 'data-k="output_lang"', 'id="e_lang"', 'data-f="output_lang"')),
+      True)
+
 print("ALL PASSED" if not fails else f"{len(fails)} failed")
 db.engine.dispose()
 shutil.rmtree(os.environ["PEAKCUT_DATA"], ignore_errors=True)

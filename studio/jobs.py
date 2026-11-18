@@ -418,9 +418,9 @@ def _caption_words(job, clip, words, off):
         raw = [w for w in words if clip["start"] - 1 <= w["s"] <= clip["end"] + 1]
         try:
             usage.set_context(job.get("creator"), job.get("title") or "")
-            raw = brain.captions_for(raw, job.get("lang") or "", job.get("title") or "",
-                                     output_lang=out_lang,
-                                     youtube_target=lambda: _youtube_part(job, clip, out_lang))
+            raw = brain.english_captions(raw, job.get("lang") or "", job.get("title") or "",
+                                         youtube_english=lambda: _youtube_part(job, clip, out_lang),
+                                         output_lang=out_lang)
             clip.update(fixed_words=raw, fixed_for=span)
         except Exception:  # noqa: BLE001 - captions still render with the words as heard
             pass

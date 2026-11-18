@@ -632,9 +632,9 @@ def captions_for(words: list, lang: str, title: str = "", output_lang: str = "en
         return roman.words(words)
 
 
-def english_captions(words: list, lang: str, title: str = "", youtube_english=None) -> list:
-    """Backward-compatible helper for English-targeted captions."""
-    return captions_for(words, lang, title, output_lang="en", youtube_target=youtube_english)
+def english_captions(words: list, lang: str, title: str = "", youtube_english=None, output_lang: str = "en") -> list:
+    """Captions for a clip (defaults to English for legacy callers; honors `output_lang` when passed)."""
+    return captions_for(words, lang, title, output_lang=output_lang, youtube_target=youtube_english)
 
 
 def fix_caption_words(words: list, title: str = "", lang: str = "", output_lang: str = "en") -> list:

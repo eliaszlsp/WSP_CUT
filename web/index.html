@@ -1399,8 +1399,12 @@ function setTab(t) {
 }
 
 /* ============================================================ add bar */
+const LANG_DEFAULT = {pt: "Português (BR)", source: "Same as spoken", en: "English"};
+const LANG_HINTS = {pt: "PT-BR captions & titles", source: "Keep original audio", en: "Translate to English"};
+const langMap = () => S.status?.languages || LANG_DEFAULT;
+const defLang = () => S.status?.default_lang || "pt";
 function drawAdd(variant) {
-  const c = creator();
+  const c = creator(), langs = langMap(), curLang = c?.output_lang || defLang();
   $("#add").innerHTML = `<form class="composer ${variant === "hero" ? "big" : "compact"}" id="addform">
     <div class="composer-input">${ic("link")}<input id="url" placeholder="Paste a YouTube, Twitch or Kick video link" autocomplete="off" aria-label="Video link"></div>
     <div class="att" id="att"><div><div class="att-in" id="attIn"></div></div></div>
@@ -1412,6 +1416,9 @@ function drawAdd(variant) {
       <button class="btn primary" id="goBtn">${ic("scissors")}Make clips</button>
     </div>
     <div class="composer-opts" inert><div class="og">
+      <div class="ob wide"><div class="ot">Output language (captions, hooks &amp; titles)</div><input type="hidden" id="o_lang" value="${esc(curLang)}"><div class="seg" role="group" aria-label="Output language">
+        ${Object.entries(langs).map(([k, v]) => `<button type="button" data-seg="o_lang" data-v="${esc(k)}" aria-pressed="${k === curLang}">${esc(v)}<small>${esc(LANG_HINTS[k] || "")}</small></button>`).join("")}
+      </div></div>
       <div class="ob wide"><div class="ot">Clips</div><div class="nsteps">
         ${stepper("o_max", "How many", c?.max_clips ?? 6, 1, 20, 1, "")}
         ${stepper("o_min", "Shortest", c?.min_len ?? 15, 5, 120, 5, "s")}
@@ -1468,7 +1475,7 @@ document.addEventListener("click", e => {
     p.querySelector("input[type=hidden]").dispatchEvent(new Event("change", {bubbles: true})); return; }
   if (!e.target.closest(".pick") || e.target.closest(".pick-new")) closePicks();
   const sg = e.target.closest("[data-seg]");
-  if (sg && !sg.disabled) { $("#" + sg.dataset.seg).value = sg.dataset.v;
+  if (sg && !sg.disabled) { const hi = $("#" + sg.dataset.seg); hi.value = sg.dataset.v; if (sg.dataset.seg === "o_lang") hi.dataset.overridden = "true";
     sg.parentElement.querySelectorAll("[data-seg]").forEach(b => b.setAttribute("aria-pressed", String(b === sg))); return; }
   const st = e.target.closest("[data-step]");
   if (st) { const i = $("#" + st.dataset.step), s = Number(i.step) || 1, d = Number(st.dataset.d);
@@ -1486,7 +1493,7 @@ document.addEventListener("keydown", e => {
 const targetCreator = () => creatorId() || $("#o_creator")?.value || "";
 function jobOptions() {
   const n = id => { const v = $(id).value; return v === "" ? null : Number(v); };
-  const o = {max_clips:n("#o_max"), min_len:n("#o_min"), max_len:n("#o_maxlen"), captions:$("#o_captions").checked, style:$("#o_style").value, layout:$("#o_layout").value, quality:n("#o_quality")};
+  const o = {max_clips:n("#o_max"), min_len:n("#o_min"), max_len:n("#o_maxlen"), captions:$("#o_captions").checked, output_lang:$("#o_lang")?.value || defLang(), style:$("#o_style").value, layout:$("#o_layout").value, quality:n("#o_quality")};
   if (n("#o_from") !== null) o.range_start = n("#o_from") * 60;
   if (n("#o_to") !== null) o.range_end = n("#o_to") * 60;
   return o;
@@ -1889,16 +1896,17 @@ function drawCreatorForm() {
     <div class="card"><h2>How the AI decides</h2><p class="help">Two separate AI checks. The words judge reads only what was said. The reaction judge sees only how loud the streamer got and how busy chat was, never the words.</p>
       <div class="fields">
         <label class="f">Check the live stream every<select data-k="ai_every_min">${opts({1:"1 minute", 2:"2 minutes", 3:"3 minutes", 5:"5 minutes", 10:"10 minutes"}, c.ai_every_min || 3)}</select><small class="sub" id="costhint" style="font-weight:400">${costHint(c.ai_every_min)}</small></label>
-        <p class="help span" style="margin:0">On top of that, the AI always looks straight away when the stream suddenly gets louder or chat gets busier, and when someone says "clip" or "clip it".</p>
+        <p class="help span" style="margin:0">On top of that, the AI always looks straight away when the stream suddenly gets louder or chat gets busier, and when someone says "clip", "clip it", "clipa" or "corta isso".</p>
         <label class="f">Most live clips per hour<input data-k="live_per_hour" type="number" min="1" max="60" value="${c.live_per_hour}"></label>
         <label class="f">Make a clip when<select data-k="decide_mode">${opts({both:"Both judges say yes", either:"Both say yes, or the words judge is very sure (90+)"}, c.decide_mode)}</select></label>
         <label class="f">Words judge must score at least<input data-k="min_score" type="number" min="0" max="100" value="${c.min_score}"></label>
         <label class="f">Make sure there's a live clip at least every<select data-k="must_clip_min">${opts({0:"Off", 15:"15 minutes", 30:"30 minutes", 60:"1 hour", 120:"2 hours"}, c.must_clip_min)}</select></label>
         <label class="f">Minimum gap between live clips (minutes)<input data-k="min_gap_min" type="number" min="0" max="60" value="${c.min_gap_min}"></label>
-        <label class="f span">Always clip the last 30 seconds when someone says<input data-k="trigger_words" value="${esc(c.trigger_words)}" placeholder="clip that, clip it"><small class="sub" style="font-weight:400">Separate phrases with commas. Matched on the transcript, so it needs no AI call.</small></label>
+        <label class="f span">Always clip the last 30 seconds when someone says<input data-k="trigger_words" value="${esc(c.trigger_words)}" placeholder="clip that, clip it, clipa isso"><small class="sub" style="font-weight:400">Separate phrases with commas. Matched on the transcript (accents ignored), so it needs no AI call.</small></label>
       </div></div>
-    <div class="card"><h2>Clips</h2><p class="help">How this creator's clips look.</p>
+    <div class="card"><h2>Clips</h2><p class="help">How this creator's clips look and what language they use.</p>
       <div class="fields"><label class="sw span"><input type="checkbox" data-k="captions" data-caption-toggle ${c.captions === false ? "" : "checked"}>Generate captions</label>
+        <label class="f">Output language<select data-k="output_lang">${opts(langMap(), c.output_lang || defLang())}</select><small class="sub" style="font-weight:400">Used for hooks, titles, descriptions and captions.</small></label>
         <label class="f">Caption style<select data-k="style" data-caption-style ${c.captions === false ? "disabled" : ""}>${opts(S.status.styles, c.style)}</select></label>
         <label class="f">Layout<select data-k="layout">${opts(S.status.layouts, c.layout)}</select></label>
         <label class="f">Game<input data-k="game" value="${esc(c.game || "")}" placeholder="Read from the title"><small class="sub" style="font-weight:400">Left empty, the game is read from the stream's title. Set it for a streamer whose title says nothing: GTA 6, Fortnite, Elden Ring.</small></label>
@@ -2331,6 +2339,7 @@ function drawClipDlg(full) {
         <h3>On the video</h3>
         <label class="f">Big text<input data-f="hook" value="${esc(c.hook)}"></label>
         <label class="sw"><input type="checkbox" data-f="captions" data-caption-toggle ${c.captions === false ? "" : "checked"}>Generate captions</label>
+        <label class="f">Caption language<select id="e_lang" data-f="output_lang" data-caption-style ${c.captions === false ? "disabled" : ""}>${opts(langMap(), c.output_lang || j?.options?.output_lang || defLang())}</select></label>
         <div class="two"><label class="f">Caption style<select data-f="style" data-caption-style ${c.captions === false ? "disabled" : ""}>${opts(S.status.styles, c.style)}</select></label>
           <label class="f">Layout<select data-f="layout">${opts(S.status.layouts, c.layout)}</select></label></div>
         <div class="two"><label class="f">Start (seconds)<input data-f="start" type="number" step="0.5" value="${c.start}"></label>
@@ -2414,8 +2423,13 @@ function syncCaptionStyle(toggle) {
 document.addEventListener("change", async e => {
   const t = e.target;
   if (t.id === "o_creator") {
-    const toggle = $("#o_captions"), c = S.creators.find(c => c.id === t.value);
+    const toggle = $("#o_captions"), lo = $("#o_lang"), c = S.creators.find(c => c.id === t.value);
     if (!toggle.dataset.overridden) { toggle.checked = c?.captions !== false; syncCaptionStyle(toggle); }
+    if (lo && !lo.dataset.overridden) {
+      const want = c?.output_lang || defLang();
+      lo.value = want;
+      $$('[data-seg="o_lang"]').forEach(b => b.setAttribute("aria-pressed", String(b.dataset.v === want)));
+    }
     return;
   }
   if (t.hasAttribute("data-caption-toggle")) {
