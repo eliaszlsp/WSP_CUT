@@ -1739,7 +1739,9 @@ function clipHtml(j, c) {
     : c.status === "error" ? `<span class="making" style="animation:none;color:var(--bad);background:var(--bad-soft)">Could not make this clip. Open it to try again.</span>`
     : `<span class="making">${c.status === "rendering" ? "Making this clip…" : "Waiting its turn…"}</span>`;
   const key = `c:${j.id}:${c.id}`, busyClip = c.status === "queued" || c.status === "rendering";
-  const pills = postPills(c), canArch = c.status === "done" && !c.drive && S.status?.gdrive?.connected;
+  const kindPills = (c.format === "16:9" || c.clip_kind === "long" ? `<span class="pill">16:9</span>` : "")
+    + (c.parent_clip ? `<span class="pill">Derived Short</span>` : "");
+  const pills = kindPills + postPills(c), canArch = c.status === "done" && !c.drive && S.status?.gdrive?.connected;
   return `<article class="clip ${sel().has(key) ? "picked" : ""}">
     <button class="shot" type="button" data-act="openclip" ${a} aria-label="Open clip: ${esc(c.title || c.hook)}">${body}
       <span class="badge l ${scoreCls(c.score)}" title="AI score">${c.score || "Hand"}</span><span class="badge r">${fmt(c.end - c.start)}</span></button>
@@ -1924,6 +1926,20 @@ function drawCreatorForm() {
         <label class="f">Longest clip (seconds)<input data-k="max_len" type="number" value="${c.max_len}"></label>
         <label class="f">Clips per video<input data-k="max_clips" type="number" value="${c.max_clips}"></label>
         <label class="f">Minutes of live stream to keep<input data-k="buffer_min" type="number" value="${c.buffer_min}"></label></div></div>
+    <div class="card"><h2>Long YouTube Videos & Sequential Parts</h2><p class="help">Cut 10–20 min horizontal (16:9) videos for YouTube, derive Shorts from them, and optionally chop each one into sequential Part 1, Part 2… clips.</p>
+      <div class="fields">
+        <label class="f">Long videos (16:9, YouTube)<select data-k="long_mode">${opts({off:"Off — Shorts only", block:"Continuous 10–20 min blocks", compile:"Best-moments 10–20 min compilation", both:"Both blocks and compilation"}, c.long_mode || "off")}</select></label>
+        <label class="f">Thumbnail style<select data-k="thumb_mode">${opts({local:"Fast local (frame + bold text)", ai:"AI-generated (Gemini + fallback)"}, c.thumb_mode || "local")}</select></label>
+        <label class="f">Shortest long video (seconds)<input data-k="long_min_len" type="number" min="300" max="1200" value="${c.long_min_len ?? 600}"></label>
+        <label class="f">Longest long video (seconds)<input data-k="long_max_len" type="number" min="600" max="1800" value="${c.long_max_len ?? 1200}"></label>
+        <label class="sw span"><input type="checkbox" data-k="derive_shorts" ${c.derive_shorts === false ? "" : "checked"}><span>Extract Shorts from long videos<small>Links Shorts inside each long block and extracts extra Shorts when a block has none.</small></span></label>
+        <label class="sw span"><input type="checkbox" data-k="long_enabled" ${c.long_enabled ? "checked" : ""}><span>Generate long horizontal videos (YouTube 16:9)<small>Checked separately in longer cycles; posted only to connected YouTube accounts.</small></span></label>
+        <label class="f">Check for long arcs every (minutes)<input data-k="long_every_min" type="number" min="10" max="120" value="${c.long_every_min || 20}"></label>
+        <label class="f">Minimum long video score<input data-k="long_min_score" type="number" min="0" max="100" value="${c.long_min_score ?? 70}"></label>
+        <label class="sw span"><input type="checkbox" data-k="series_enabled" ${c.series_enabled ? "checked" : ""}><span>Split each long video into sequential parts (Part 1, Part 2…)<small>Creates numbered vertical clips and posts them in strict order across Shorts, TikTok and Reels.</small></span></label>
+        <label class="f">Shortest part (seconds)<input data-k="series_part_min" type="number" min="30" max="150" value="${c.series_part_min || 60}"></label>
+        <label class="f">Longest part (seconds)<input data-k="series_part_max" type="number" min="45" max="180" value="${c.series_part_max || 90}"></label>
+      </div></div>
     <div class="card"><h2>Posting</h2><p class="help">${A.length ? "Choose the accounts this creator's clips go to. One account can be shared by several creators." : "No accounts are connected yet. Connect one in Settings, then come back."}</p>
       ${A.length ? `<div class="row" style="margin-bottom:16px">${A.map(a => `<label class="ck"><input type="checkbox" data-acc value="${esc(a.id)}" ${c.accounts.includes(a.id) ? "checked" : ""}>${esc(a.label)} · ${esc(a.name)}</label>`).join("")}</div>` : `<button class="btn" data-act="go" data-v="settings" style="margin-bottom:16px">${ic("cog")}Open Settings</button>`}
       <div class="fields"><label class="sw span"><input type="checkbox" data-k="autopost" ${c.autopost ? "checked" : ""}><span>Post new clips automatically<small>Clips that score high enough go out without you approving them.</small></span></label>
@@ -2006,8 +2022,11 @@ function drawOverview() {
     <div class="card"><div class="card-head"><div><h2>Post queue</h2><p class="sub">${o.paused ? "Paused. Recording and clipping carry on; nothing is posted." : "Queued clips go out at their scheduled time."}</p></div>
         <button class="btn ${o.paused ? "primary" : ""}" data-act="pause">${ic(o.paused ? "play" : "pause")}${o.paused ? "Resume posting" : "Pause all posting"}</button></div>
       ${o.posts.length ? `<div class="scroll"><table class="stack"><tr><th>When</th><th>Clip</th><th>Creator</th><th>Account</th><th class="num">Views</th><th></th></tr>
-      ${o.posts.map(p => `<tr><td data-l="Status">${pst(p)}</td><td data-l="Clip" class="c-main">${p.url ? `<a class="lnk" href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.title)}</a>` : esc(p.title)}${p.error ? `<div class="err" style="margin:2px 0 0">${esc(p.error)}</div>` : ""}</td><td data-l="Creator">${esc(p.creator_name || "None")}</td><td data-l="Account">${esc(p.account_name)}</td><td data-l="Views" class="num">${p.views ?? "–"}</td>
-        <td class="c-act" style="text-align:right">${p.status === "scheduled" ? `<button class="btn sm" data-act="pcancel" data-id="${p.id}">Cancel</button>` : p.status === "failed" ? `<button class="btn sm" data-act="pretry" data-id="${p.id}">Retry</button>` : ""}</td></tr>`).join("")}</table></div>`
+      ${o.posts.map(p => {
+        const prio = p.priority === 1 ? `<span class="pill">P1 · 16:9</span> ` : p.priority === 2 ? `<span class="pill">P2 · Derived</span> ` : "";
+        return `<tr><td data-l="Status">${pst(p)}</td><td data-l="Clip" class="c-main">${prio}${p.url ? `<a class="lnk" href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.title)}</a>` : esc(p.title)}${p.error ? `<div class="err" style="margin:2px 0 0">${esc(p.error)}</div>` : ""}</td><td data-l="Creator">${esc(p.creator_name || "None")}</td><td data-l="Account">${esc(p.account_name)}</td><td data-l="Views" class="num">${p.views ?? "–"}</td>
+        <td class="c-act" style="text-align:right">${p.status === "scheduled" ? `<button class="btn sm" data-act="pcancel" data-id="${p.id}">Cancel</button>` : p.status === "failed" ? `<button class="btn sm" data-act="pretry" data-id="${p.id}">Retry</button>` : ""}</td></tr>`;
+      }).join("")}</table></div>`
       : `<p class="help">Nothing queued or posted yet.</p>`}</div>`);
 }
 
@@ -2423,12 +2442,15 @@ function drawClipDlg(full) {
     : c.status === "error" ? `<div class="err" style="padding:20px;text-align:center">${esc(c.error || "Could not make this clip.")}</div>`
     : `<span class="making">${c.status === "rendering" ? "Making this clip…" : "Waiting its turn…"}</span>`;
   if (full) {
+    const isLong = c.format === "16:9" || c.clip_kind === "long";
+    const postAccs = isLong ? S.accounts.filter(a => a.platform === "youtube") : S.accounts;
     dlg.innerHTML = `<div class="editor"><div class="stage" id="stage">${stage}</div>
       <div class="panel">
         <div class="job-head" style="margin:0"><div><span class="badge ${scoreCls(c.score)}" style="position:static">${c.judges ? "Words " + c.judges.words + (c.judges.reaction ? " · Reaction " + c.judges.reaction : "") : c.score ? "Score " + c.score : "Clipped by hand"}</span>
           <p class="sub" style="margin-top:8px">${esc(c.reason || "")}</p></div><button class="btn icon ghost" type="button" data-act="closedlg" aria-label="Close">${ic("x")}</button></div>
         <h3>On the video</h3>
         <label class="f">Big text<input data-f="hook" value="${esc(c.hook)}"></label>
+        ${isLong ? `<label class="f">Thumbnail text<input data-f="thumb_text" maxlength="40" value="${esc(c.thumb_text || "")}" placeholder="2–4 bold words"></label>` : ""}
         <label class="sw"><input type="checkbox" data-f="captions" data-caption-toggle ${c.captions === false ? "" : "checked"}>Generate captions</label>
         <label class="f">Caption language<select id="e_lang" data-f="output_lang" data-caption-style ${c.captions === false ? "disabled" : ""}>${opts(langMap(), c.output_lang || j?.options?.output_lang || defLang())}</select></label>
         <div class="two"><label class="f">Caption style<select data-f="style" data-caption-style ${c.captions === false ? "disabled" : ""}>${opts(S.status.styles, c.style)}</select></label>
@@ -2441,10 +2463,11 @@ function drawClipDlg(full) {
         <button class="btn" type="button" data-act="remake" ${rawGone ? "disabled" : ""}>${ic("scissors")}Save and re-make clip</button>
         <div id="darchnote"></div>
         <h3>Post it</h3>
+        ${isLong ? `<p class="sub" style="margin:0">16:9 videos post to YouTube only</p>` : ""}
         <div id="dposts" class="row" style="gap:4px"></div>
-        ${S.accounts.length ? `<div class="row">${S.accounts.map(a => `<label class="ck"><input type="checkbox" data-pacc value="${esc(a.id)}">${esc(a.label)} · ${esc(a.name)}</label>`).join("")}</div>
+        ${postAccs.length ? `<div class="row">${postAccs.map(a => `<label class="ck"><input type="checkbox" data-pacc value="${esc(a.id)}">${esc(a.label)} · ${esc(a.name)}</label>`).join("")}</div>
           <div class="row"><button class="btn primary" type="button" data-act="postnow">${ic("send")}Post now</button><button class="btn" type="button" data-act="postqueue">Add to queue</button></div>`
-          : `<p class="help">No accounts connected yet. Connect one in Settings.</p>`}
+          : `<p class="help">${isLong ? "No YouTube account connected yet. Connect one in Settings." : "No accounts connected yet. Connect one in Settings."}</p>`}
         <div id="dfoot" class="row" style="margin-top:auto;padding-top:8px;border-top:1px solid var(--line)"></div>
       </div></div>`;
   } else if (D.sig !== sig) $("#stage").innerHTML = stage;

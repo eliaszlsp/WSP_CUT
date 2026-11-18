@@ -100,7 +100,9 @@ def main() -> int:
                 ("the storage folder: full drive, open, move", ["tests/test_storage.py"]),
                 ("security: visitor address, email addresses, Google sign-in, prompts", ["tests/test_hardening.py"]),
                 ("long logs, the machine monitor, failed recordings, admin day totals", ["tests/test_robustness.py"]),
-                ("Google Drive archiving and SSD cleanup", ["tests/test_gdrive.py"])]
+                ("Google Drive archiving and SSD cleanup", ["tests/test_gdrive.py"]),
+                ("long videos, derived Shorts and magnetic thumbnails", ["tests/test_long_videos.py"]),
+                ("long video series", ["tests/test_long_series.py"])]
         for name, args in runs:
             print(f"\n=== {name} ===", flush=True)
             r = subprocess.run([sys.executable, *args], cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace")
