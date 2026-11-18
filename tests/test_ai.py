@@ -364,6 +364,58 @@ check("changing primary key resets primary to untested while keeping unchanged f
       [(c["role"], c["state"]) for c in pub_new_key["checks"]] == [("primary", "untested"), ("fallback", "operational")],
       str(pub_new_key["checks"]))
 
+# ---- persistent error diagnostics (survives restart), actionable fix + detail, OpenRouter HTTP 200 error & <think>
+ai.save("gemini", "gemini-3.8-flash", "", "gem-secret-key-44445555",
+        fallback_provider="openrouter", fallback_models="openrouter/free", fallback_key="or-secret-key-66667777")
+ai.httpx.post = lambda url, json=None, headers=None, timeout=None, **_k: (  # noqa: A002
+    Reply(404, {"error": {"code": 404, "message": "models/gemini-3.8-flash is not found for API version v1beta"}})
+    if "generativelanguage" in url else
+    Reply(200, {"error": {"code": 429, "message": "Provider returned rate limit for openrouter/free or-secret-key-66667777"}})
+)
+res_diag = ai.test(scope="all", raise_on_fail=False)
+r_gem = res_diag["results"][0]
+r_or_err = res_diag["results"][1]
+check("404 model error provides plain explanation, actionable fix, technical detail, and find_models action",
+      r_gem["state"] == "error" and "gemini-3.8-flash" in r_gem.get("error", "")
+      and bool(r_gem.get("fix")) and "404" in r_gem.get("detail", "")
+      and r_gem.get("action") == "find_models",
+      str(r_gem))
+check("HTTP 200 OpenRouter error payload surfaces provider message instead of KeyError and redacts key",
+      r_or_err["state"] == "error" and "KeyError" not in r_or_err.get("detail", "")
+      and "rate limit" in (r_or_err.get("error", "") + " " + r_or_err.get("detail", "")).lower()
+      and r_or_err.get("action") == "check_quota"
+      and "or-secret-key-66667777" not in json.dumps(res_diag),
+      str(r_or_err))
+
+# Simulate full server restart: clear in-memory _health and _saved cache
+ai._health.clear()
+ai._saved["at"] = None
+pub_after_restart = ai.public()
+check("failed test states, fixes and details persist across server restart without leaking keys",
+      [(c["role"], c["state"], c.get("action")) for c in pub_after_restart["checks"]] == [
+          ("primary", "error", "find_models"), ("fallback", "error", "check_quota")
+      ] and bool(pub_after_restart["checks"][0].get("detail")),
+      str(pub_after_restart["checks"]))
+
+# <think> reasoning tags before JSON on free models are stripped cleanly
+ai.httpx.post = lambda url, json=None, headers=None, timeout=None, **_k: Reply(  # noqa: A002
+    200, {"choices": [{"message": {"content": '<think>Drafting {"items":["wrong"]} first</think>\n{"items":["ok"]}'}}],
+          "usage": {"prompt_tokens": 5, "completion_tokens": 5}}
+)
+ans_think, _, _ = ai.call("openrouter/free", "hi", {"type": "ARRAY", "items": {"type": "STRING"}}, provider_id="openrouter")
+check("<think> reasoning block is ignored so final JSON answer parses cleanly",
+      ans_think == ["ok"], str(ans_think))
+
+# Gemini HTTP 200 blocked response without candidates gives actionable AIError instead of KeyError
+ai.httpx.post = lambda url, json=None, headers=None, timeout=None, **_k: Reply(  # noqa: A002
+    200, {"promptFeedback": {"blockReason": "SAFETY"}}
+)
+res_blocked = ai.test(scope="primary", raise_on_fail=False)
+check("Gemini empty candidates response reports SAFETY reason instead of KeyError",
+      "SAFETY" in (res_blocked["results"][0].get("detail", "") + res_blocked["results"][0].get("error", ""))
+      and "KeyError" not in res_blocked["results"][0].get("detail", ""),
+      str(res_blocked["results"][0]))
+
 print("ALL PASSED" if not fails else f"{len(fails)} failed")
 import shutil  # noqa: E402
 db.engine.dispose()

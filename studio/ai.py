@@ -211,24 +211,117 @@ def _fp(cfg: dict) -> str:
     return hashlib.sha256(f"{cfg['provider']}|{addr}|{cfg.get('key', '')}".encode("utf-8")).hexdigest()[:12]
 
 
+def _clean_detail(redacted_text: str) -> str:
+    """Turn an HTTP + JSON error string into one clean, readable technical line."""
+    s = re.sub(r"\s+", " ", (redacted_text or "").strip())
+    m_http = re.match(r"^(HTTP\s+\d{3})\s+(.*)$", s)
+    prefix, body = (m_http.group(1), m_http.group(2).strip()) if m_http else ("", s)
+    for chunk in _json_chunks(body):
+        try:
+            obj = json.loads(chunk)
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            err = obj.get("error")
+            msg = err.get("message") if isinstance(err, dict) else (err if isinstance(err, str) else obj.get("message"))
+            code = err.get("code") if isinstance(err, dict) else obj.get("code")
+            if msg:
+                tag = prefix or (f"HTTP {code}" if code else "")
+                return f"{tag}: {msg}".strip(": ")[:280]
+    return (f"{prefix}: {body}".strip(": ") if prefix else s)[:280]
+
+
+def diagnose(e, provider_id: str | None = None, model: str | None = None, extra_key: str = "") -> dict:
+    """Structured error diagnosis (what happened, how to fix it, technical detail, quick action) with all keys redacted."""
+    raw = redact(e)
+    ek = str(extra_key or "").strip()
+    if ek:
+        raw = raw.replace(ek, "<key>")
+    low = raw.lower()
+    pid = _norm(provider_id or getattr(e, "provider_id", None) or provider())
+    svc = PROVIDERS.get(pid, (label() or "The AI service",))[0]
+    name = model or getattr(e, "model", None) or (models() or ["?"])[0]
+    detail = _clean_detail(raw)
+    if "404" in raw or "not found" in low or "does not exist" in low or "unknown model" in low or "not_found" in low:
+        return {
+            "error": f'{svc} doesn\'t know the model "{name}".',
+            "fix": f'Click "Find valid models" to load the exact model IDs {svc} supports for your key, pick one, then press Save and test all.',
+            "detail": detail,
+            "action": "find_models",
+        }
+    if "401" in raw or "403" in raw or "api key" in low or "api_key" in low or "invalid_api_key" in low or "unauthorized" in low or "permission" in low:
+        return {
+            "error": f"{svc} refused the API key.",
+            "fix": f"Generate or copy a valid key from {svc}, paste it into the Key box below, and press Save and test all.",
+            "detail": detail,
+            "action": "focus_key",
+        }
+    if "429" in raw or "quota" in low or "rate limit" in low or "exhausted" in low or "insufficient_quota" in low or "credit" in low:
+        return {
+            "error": f"{svc} says this key or model hit a rate limit or has no credit left.",
+            "fix": f'Wait a minute and re-test, switch to another free/available model via "Find valid models", or check quota on {svc}.',
+            "detail": detail,
+            "action": "check_quota",
+        }
+    if "connect" in low or "timed out" in low or "timeout" in low or "getaddrinfo" in low or "refused" in low or "nodename" in low or "servname" in low or "nameresolution" in low or "name resolution" in low:
+        return {
+            "error": f"PeakCut couldn't reach {svc}.",
+            "fix": "Make sure Ollama is running locally and its address is right." if pid == "ollama" else "Check your internet connection (or custom address) and re-test.",
+            "detail": detail,
+            "action": "check_url",
+        }
+    return {
+        "error": detail or f"{svc} did not return a usable answer.",
+        "fix": f'Try another model via "Find valid models" or re-test {svc}.',
+        "detail": detail,
+        "action": "find_models",
+    }
+
+
+def _persist_health(hkey: str, rec: dict):
+    """Save redacted health check state into ai.json when ai.json already exists on disk."""
+    f = _file()
+    if not f.is_file():
+        return
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return
+        hmap = dict(data.get("health") or {}) if isinstance(data.get("health"), dict) else {}
+        hmap[hkey] = rec
+        if len(hmap) > 40:
+            newest = sorted(hmap.items(), key=lambda kv: float((kv[1] or {}).get("at") or 0), reverse=True)[:40]
+            hmap = dict(newest)
+        data["health"] = hmap
+        tmp = f.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        tmp.replace(f)
+        _saved["at"] = None
+    except (OSError, ValueError):
+        pass
+
+
 def record_health(provider_id: str, model: str, ok: bool, ms: int = 0, error=None, cfg: dict | None = None, extra_key: str = "") -> dict:
     """Remember whether one (provider, model) answered and how fast, keyed by a hash of its address and key."""
     cfg = cfg or _cfg_for(provider_id)
-    err = ""
-    if not ok:
-        raw = explain(error, provider_id=cfg["provider"], model=model) or redact(error)
-        ek = str(extra_key or "").strip()
-        if ek:
-            raw = raw.replace(ek, "<key>")
-        err = raw[:200]
-    rec = {"state": "operational" if ok else "error", "ok": bool(ok), "ms": max(0, int(ms)), "at": time.time(), "error": err}
+    diag = {"error": "", "fix": "", "detail": "", "action": ""} if ok else diagnose(error, provider_id=cfg["provider"], model=model, extra_key=extra_key)
+    rec = {"state": "operational" if ok else "error", "ok": bool(ok), "ms": max(0, int(ms)), "at": time.time(), **diag}
+    fp = _fp(cfg)
     with _lock:
-        _health[(cfg["provider"], model, _fp(cfg))] = rec
+        _health[(cfg["provider"], model, fp)] = rec
+        if not extra_key:
+            _persist_health(f"{cfg['provider']}|{model}|{fp}", rec)
     return rec
 
 
 def health_rows() -> list[dict]:
     """Connection status for every configured primary and fallback model, in execution order."""
+    d = _from_dashboard()
+    disk_health = d.get("health") if isinstance(d.get("health"), dict) else {}
     c, fb = current(), fallback()
     rows = []
     for role, slot in (("primary", c), ("fallback", fb)):
@@ -240,10 +333,18 @@ def health_rows() -> list[dict]:
         fp = _fp(cfg)
         for m in slot["models"]:
             rec = _health.get((p, m, fp))
+            if rec is None:
+                saved_rec = disk_health.get(f"{p}|{m}|{fp}")
+                if isinstance(saved_rec, dict) and saved_rec.get("state") in ("operational", "error"):
+                    rec = saved_rec
+                    with _lock:
+                        _health[(p, m, fp)] = rec
             state = "incomplete" if not slot_ok else (rec["state"] if rec else "untested")
             rows.append({"order": len(rows) + 1, "role": role, "provider": p, "label": cfg["label"], "model": m,
                          "ready": slot_ok, "state": state, "ms": rec["ms"] if rec else None,
-                         "at": rec["at"] if rec else None, "error": rec["error"] if rec else ""})
+                         "at": rec["at"] if rec else None, "error": rec.get("error", "") if rec else "",
+                         "fix": rec.get("fix", "") if rec else "", "detail": rec.get("detail", "") if rec else "",
+                         "action": rec.get("action", "") if rec else ""})
     return rows
 
 
@@ -358,6 +459,8 @@ def save(provider_id: str, model_ids, address: str = "", new_key=None,
     payload = {"provider": p, "models": ms, "base_url": address, "key": k, "profiles": profs}
     if write_fb:
         payload["fallback"] = fb_data
+    if isinstance(raw.get("health"), dict):
+        payload["health"] = dict(raw["health"])
     with _lock:
         f = _file()
         tmp = f.with_suffix(".tmp")
@@ -474,7 +577,8 @@ def test(scope: str = "all", draft: dict | None = None, raise_on_fail: bool = Tr
                 if first_exc is None and (role == "primary" or scope == "fallback"):
                     first_exc = e
             results.append({"order": len(results) + 1, "role": role, "provider": cfg["provider"], "label": cfg["label"],
-                            "model": m, "ok": rec["ok"], "state": rec["state"], "ms": rec["ms"], "at": rec["at"], "error": rec["error"]})
+                            "model": m, "ok": rec["ok"], "state": rec["state"], "ms": rec["ms"], "at": rec["at"],
+                            "error": rec["error"], "fix": rec.get("fix", ""), "detail": rec.get("detail", ""), "action": rec.get("action", "")})
 
     prim_rows = [r for r in results if r["role"] == "primary"]
     fb_rows = [r for r in results if r["role"] == "fallback"]
@@ -582,12 +686,12 @@ def _json_chunks(text: str):
 
 
 def _parse(text):
-    """The JSON in an answer, even if the model wrapped it in a code fence or a sentence.
+    """The JSON in an answer, even if the model wrapped it in a code fence, <think> tags or a sentence.
 
     A model that is not careful sometimes puts a sentence in front of the JSON,
     or a second object after it, or forgets a comma. The JSON is looked for
     inside the answer rather than demanded of it."""
-    text = (text or "").strip()
+    text = re.sub(r"<think>.*?</think>", "", (text or ""), flags=re.S | re.I).strip()
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text)
     out = None
     try:
@@ -633,7 +737,11 @@ def _see_one(cfg: dict, model: str, prompt: str, b64: str, timeout: float | None
         if r.status_code != 200:
             _fail(r, model, pid)
         data = r.json()
-        text = "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"])
+        cands = data.get("candidates") or []
+        if not cands:
+            why = (data.get("promptFeedback") or {}).get("blockReason") or data.get("error") or "empty response"
+            raise AIError(f"Gemini returned no candidates ({redact(why)[:200]})", provider_id=pid, model=model)
+        text = "".join(p.get("text", "") for p in ((cands[0].get("content") or {}).get("parts") or []) if isinstance(p, dict))
         u = data.get("usageMetadata", {})
         sent = int(u.get("promptTokenCount") or 0)
         return text, sent, max(0, int(u.get("totalTokenCount") or 0) - sent)
@@ -656,7 +764,7 @@ def _see_one(cfg: dict, model: str, prompt: str, b64: str, timeout: float | None
     r = httpx.post(f"{addr}/chat/completions", json=body, headers=headers, timeout=timeout or 120)
     if r.status_code != 200:
         _fail(r, model, pid)
-    data = _openai_body(r)
+    data = _openai_body(r, model=model, provider_id=pid)
     text = (data["choices"][0]["message"].get("content") or "")
     u = data.get("usage") or {}
     return text, int(u.get("prompt_tokens") or 0), int(u.get("completion_tokens") or 0)
@@ -708,13 +816,21 @@ def _gemini(model, prompt, schema, timeout=None, cfg=None):
     if r.status_code != 200:
         _fail(r, model, cfg["provider"])
     data = r.json()
-    text = "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"])
+    cands = data.get("candidates") or []
+    if not cands:
+        why = (data.get("promptFeedback") or {}).get("blockReason") or data.get("error") or "empty response"
+        raise AIError(f"Gemini returned no candidates ({redact(why)[:200]})", provider_id=cfg["provider"], model=model)
+    text = "".join(p.get("text", "") for p in ((cands[0].get("content") or {}).get("parts") or []) if isinstance(p, dict))
     u = data.get("usageMetadata", {})
     sent = int(u.get("promptTokenCount") or 0)
-    return json.loads(text), sent, max(0, int(u.get("totalTokenCount") or 0) - sent)   # the answer, and any thinking billed with it
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        parsed = _parse(text)
+    return parsed, sent, max(0, int(u.get("totalTokenCount") or 0) - sent)   # the answer, and any thinking billed with it
 
 
-def _openai_body(r):
+def _openai_body(r, model: str | None = None, provider_id: str | None = None):
     """The answer, whether the service sent plain JSON or an event stream.
 
     Some OpenAI-compatible servers answer with a stream of events unless the
@@ -725,7 +841,15 @@ def _openai_body(r):
         data = r.json()
     except ValueError:
         data = _from_events(r.text)
-    for ch in data.get("choices") or []:
+    if isinstance(data, dict) and data.get("error"):
+        err = data["error"]
+        msg = err.get("message") if isinstance(err, dict) else str(err)
+        code = err.get("code") if isinstance(err, dict) else r.status_code
+        raise AIError(f"HTTP {code} {redact(msg)[:300]}", provider_id=provider_id, model=model)
+    choices = (data.get("choices") if isinstance(data, dict) else None) or []
+    if not choices:
+        raise AIError(f"HTTP {r.status_code} service returned no choices", provider_id=provider_id, model=model)
+    for ch in choices:
         msg = ch.get("message") or {}
         if (msg.get("content") or "").strip():
             continue
@@ -778,7 +902,7 @@ def _openai(model, prompt, schema, timeout=None, cfg=None):
             break
     if r.status_code != 200:
         _fail(r, model, cfg["provider"])
-    data = _openai_body(r)
+    data = _openai_body(r, model=model, provider_id=cfg["provider"])
     u = data.get("usage") or {}
     return _parse(data["choices"][0]["message"].get("content")), int(u.get("prompt_tokens") or 0), int(u.get("completion_tokens") or 0)
 

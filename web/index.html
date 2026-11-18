@@ -454,7 +454,21 @@ img.av{object-fit:cover}
 .ai-chk-top b{font-size:13px;color:var(--brand-ink)}
 .ai-chk-top code{font-size:12px;background:var(--muted);padding:2px 7px;border-radius:6px;color:var(--text)}
 .ai-chk-top .ms{margin-left:auto;font-size:12px;color:var(--faint);font-variant-numeric:tabular-nums}
-.ai-chk-err{font-size:12px;color:var(--bad)}
+.ai-chk.bad{border-color:#F0B6B6;background:#FFF8F8}
+.ai-chk.ok{border-color:#BCE5CD}
+.ai-chk-err{font-size:13px;font-weight:600;color:var(--bad);margin-top:4px;line-height:1.45}
+.ai-chk-how{font-size:12px;color:var(--text);line-height:1.45;margin-top:2px}
+.ai-chk-det{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11.5px;color:#7A1F1F;background:#FDECEC;padding:6px 9px;border-radius:6px;margin-top:5px;overflow-wrap:anywhere}
+.ai-chk-fix{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:7px}
+.ai-mchips{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:8px}
+.ai-mchips small{font-size:11.5px;color:var(--dim);font-weight:600}
+.ai-mchip{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11.5px;padding:3px 9px;border-radius:999px;border:1px solid var(--line-2);background:#fff;color:var(--brand-ink);cursor:pointer;transition:background-color .15s ease,border-color .15s ease,color .15s ease}
+.ai-mchip:hover,.ai-mchip:focus-visible{background:var(--brand-soft);border-color:var(--brand);color:var(--brand-deep)}
+.ai-alert{max-width:560px;margin:0 0 16px;padding:12px 14px;border-radius:10px;border:1px solid var(--line-2);display:grid;gap:6px;font-size:13px;line-height:1.45}
+.ai-alert.bad{background:#FFF5F5;border-color:#ECAAAA;color:#7A1F1F}
+.ai-alert.warn{background:var(--brand-soft);border-color:var(--brand);color:var(--brand-ink)}
+.ai-alert-top{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.ai-alert-top b{font-weight:600}
 .btn-spin{display:inline-block;width:13px;height:13px;border-radius:50%;border:2px solid currentColor;border-right-color:transparent;animation:spin .75s linear infinite;flex:none}
 .ai-prog{margin:10px 0 14px;max-width:560px;padding:12px 14px;border-radius:10px;background:var(--brand-soft);border:1px solid var(--brand);display:grid;gap:8px}
 .ai-prog-head{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:13px;font-weight:600;color:var(--brand-ink)}
@@ -2074,17 +2088,57 @@ function aiHints(changed) {
   $("#ai_fb_base").placeholder = fpv.address || "http://127.0.0.1:1234/v1";
   $("#ai_fb_basewrap").hidden = fpv.id !== "custom" && !$("#ai_fb_base").value;
 }
+function aiGuessDiag(msg, label, model) {
+  const raw = String(msg || "").trim(), low = raw.toLowerCase();
+  if (/404|not found|does not exist|unknown model|not_found/.test(low)) {
+    return {error: `${label} doesn't know the model "${model}".`, fix: `Click "Find valid models" to load the exact model IDs ${label} supports for your key, pick one, then press Save and test all.`, detail: raw, action: "find_models"};
+  }
+  if (/401|403|api key|api_key|invalid_api_key|unauthorized|permission|refused the key/.test(low)) {
+    return {error: `${label} refused the API key.`, fix: `Paste a working key from ${label} in the Key field below, then press Save and test all.`, detail: raw, action: "focus_key"};
+  }
+  if (/429|quota|rate limit|exhausted|credit/.test(low)) {
+    return {error: `${label} says this key or model hit a rate limit or has no credit left.`, fix: `Wait a minute and re-test, pick another model via "Find valid models", or check quota on ${label}.`, detail: raw, action: "check_quota"};
+  }
+  return {error: raw || `${label} did not answer.`, fix: `Check the key and model name below, then press Test again.`, detail: "", action: "find_models"};
+}
 function aiEffectiveChecks(k) {
-  if (k?.checks?.length) return k.checks.map(c => ({...c}));
+  if (Array.isArray(k?.checks) && k.checks.length) return k.checks.map(c => ({...c}));
   const rows = [];
   if (k?.provider && k.models?.length) {
-    k.models.forEach(m => rows.push({order: rows.length + 1, role: "primary", provider: k.provider, label: k.label || k.provider, model: m, ready: !!k.ready, state: k.ready ? "untested" : "incomplete", ms: null, at: null, error: ""}));
+    k.models.forEach(m => rows.push({order: rows.length + 1, role: "primary", provider: k.provider, label: k.label || k.provider, model: m, ready: !!k.ready, state: k.ready ? "untested" : "incomplete", ms: null, at: null, error: "", fix: "", detail: "", action: ""}));
   }
   const fb = k?.fallback;
   if (fb?.provider && fb.models?.length) {
-    fb.models.forEach(m => rows.push({order: rows.length + 1, role: "fallback", provider: fb.provider, label: fb.label || fb.provider, model: m, ready: !!fb.ready, state: fb.ready ? "untested" : "incomplete", ms: null, at: null, error: ""}));
+    fb.models.forEach(m => rows.push({order: rows.length + 1, role: "fallback", provider: fb.provider, label: fb.label || fb.provider, model: m, ready: !!fb.ready, state: fb.ready ? "untested" : "incomplete", ms: null, at: null, error: "", fix: "", detail: "", action: ""}));
   }
   return rows;
+}
+function aiMergeChecks(baseChecks, liveChecks) {
+  if (!liveChecks?.length) return baseChecks || [];
+  const merged = (baseChecks || []).map(b => {
+    const m = liveChecks.find(l => l.role === b.role && l.provider === b.provider && l.model === b.model && (l.state === "error" || l.state === "operational"));
+    if (!m) return b;
+    if (b.state === "untested" || b.state === "incomplete" || ((m.at || 0) >= (b.at || 0))) return {...b, ...m, order: b.order};
+    return b;
+  });
+  return merged;
+}
+function aiRoleStateFromChecks(role, checks) {
+  const rs = (checks || []).filter(c => c.role === role);
+  if (!rs.length || !rs.some(c => c.ready)) return "off";
+  if (rs.some(c => c.state === "operational")) return "operational";
+  if (rs.every(c => c.state === "error")) return "error";
+  return "untested";
+}
+function renderAiAlert() {
+  const parts = [];
+  if (S.aiStaleServer) {
+    parts.push(`<div class="ai-alert warn" role="alert"><div class="ai-alert-top"><span><b>Restart PeakCut's server to finish updating:</b> this page loaded the newest UI, but the Python server running in your terminal is still on the previous version (so fallback and per-model tests cannot run properly yet). Stop <code>python -m studio.server</code> and start it again.</span></div></div>`);
+  }
+  if (S.aiBanner) {
+    parts.push(`<div class="ai-alert ${S.aiBanner.kind || "bad"}" role="alert"><div class="ai-alert-top"><span><b>${esc(S.aiBanner.title || "Action needed")}</b> — ${esc(S.aiBanner.body || "")}</span><button class="btn sm ghost" type="button" data-act="aidismiss">Dismiss</button></div>${S.aiBanner.detail ? `<div class="ai-chk-det">${esc(S.aiBanner.detail)}</div>` : ""}</div>`);
+  }
+  return parts.join("");
 }
 function renderAiProg(prog) {
   if (!prog) return "";
@@ -2102,9 +2156,23 @@ function renderAiChecks(checks, prog) {
       : c.state === "queued" ? "Waiting in queue…"
       : c.at ? `${c.ms != null ? c.ms + " ms · " : ""}${when(c.at)}`
       : (c.state === "untested" ? "Press Test to verify live connection" : "");
-    return `<div class="ai-chk ${c.state === "testing" ? "testing" : ""}">
+    const cls = c.state === "testing" ? "testing" : c.state === "error" ? "bad" : c.state === "operational" ? "ok" : "";
+    const showDet = c.detail && c.detail !== c.error;
+    const copyFull = [c.label, c.model, c.error, c.detail].filter(Boolean).join(" — ");
+    const foundList = (S.aiFoundModels?.[c.role === "fallback" ? "fb" : "main"] || []).slice(0, 8);
+    const fixBar = c.state === "error" ? `<div class="ai-chk-fix">
+      ${c.action === "focus_key"
+        ? `<button class="btn sm primary" type="button" data-act="aifix" data-fix="key" data-role="${esc(c.role)}">Paste new key</button>`
+        : `<button class="btn sm primary" type="button" data-act="aifix" data-fix="models" data-role="${esc(c.role)}">Find valid models</button>`}
+      <button class="btn sm" type="button" data-act="aitest" data-scope="${esc(c.role)}">Test again</button>
+      <button class="btn sm ghost" type="button" data-act="copytext" data-t="${esc(copyFull)}">${ic("copy")}Copy error</button>
+    </div>${foundList.length ? `<div class="ai-mchips"><small>Click a valid model to use it:</small>${foundList.map(m => `<button class="ai-mchip" type="button" data-act="aipickmodel" data-role="${esc(c.role)}" data-m="${esc(m)}">${esc(m)}</button>`).join("")}</div>` : ""}` : "";
+    return `<div class="ai-chk ${cls}">
       <div class="ai-chk-top"><span class="pill">${c.order}. ${roleTag}</span><b>${esc(c.label)}</b><code>${esc(c.model)}</code>${aiStatePill(c.state)}<span class="ms">${esc(meta)}</span></div>
       ${c.error ? `<div class="ai-chk-err">${esc(c.error)}</div>` : ""}
+      ${c.fix ? `<div class="ai-chk-how"><b>How to fix:</b> ${esc(c.fix)}</div>` : ""}
+      ${showDet ? `<div class="ai-chk-det">${esc(c.detail)}</div>` : ""}
+      ${fixBar}
     </div>`;
   }).join("")}</div>`;
 }
@@ -2118,10 +2186,14 @@ async function drawSettings() {
   try {
     if (tab === "ai") {
       const k = S.ai = await api("/api/ai"), fb = k.fallback || {};
-      k.checks = aiEffectiveChecks(k);
+      S.aiStaleServer = !Array.isArray(k.checks);
+      k.checks = aiMergeChecks(aiEffectiveChecks(k), S.aiLastChecks);
+      const mainSt = aiRoleStateFromChecks("primary", k.checks) !== "off" ? aiRoleStateFromChecks("primary", k.checks) : (k.main_state || "untested");
+      const fbSt = aiRoleStateFromChecks("fallback", k.checks);
       const fbNote = fb.ready ? ` · Fallback: ${fb.label} (${fb.models?.[0] || ""})` : "";
       body.innerHTML = `<section class="set-sec"><h2>AI</h2><p class="help">PeakCut uses an AI model to pick the moments worth clipping and to write hooks, titles and captions. Use your own key from any of these services. You pay that service directly. Without a key, clips are picked by loudness.</p>
-          <div class="ai-state" id="ai_top_state">${k.ready ? `${aiStatePill(k.main_state || "untested", "Main")}${fb.ready ? aiStatePill(k.fallback_state || "untested", "Fallback") : ""}<span class="sub">${esc(k.label)} · ${esc((k.models[0] || "") + fbNote)}</span>` : `<span class="pill warn">Not set up</span><span class="sub">Choose a service, paste your key and pick a model.</span>`}</div>
+          <div class="ai-state" id="ai_top_state">${k.ready ? `${aiStatePill(mainSt, "Main")}${fb.ready ? aiStatePill(fbSt !== "off" ? fbSt : (k.fallback_state || "untested"), "Fallback") : ""}<span class="sub">${esc(k.label)} · ${esc((k.models[0] || "") + fbNote)}</span>` : `<span class="pill warn">Not set up</span><span class="sub">Choose a service, paste your key and pick a model.</span>`}</div>
+          <div id="ai_alert">${renderAiAlert()}</div>
           <div id="ai_health">${renderAiChecks(k.checks)}</div>
           <div class="ai-form">
             <label class="f">AI service<select id="ai_provider">${k.providers.map(x => `<option value="${esc(x.id)}" ${x.id === k.provider ? "selected" : ""}>${esc(x.label)}</option>`).join("")}</select></label>
@@ -2378,6 +2450,33 @@ document.addEventListener("click", async e => {
   if (b.tagName === "A") e.preventDefault();
   try {
     if (a === "go") { closePops(); return go(d.v, d.tab); }
+    if (a === "aidismiss") {
+      S.aiBanner = null;
+      if ($("#ai_alert")) $("#ai_alert").innerHTML = renderAiAlert();
+      return;
+    }
+    if (a === "aipickmodel") {
+      const isFb = d.role === "fallback";
+      const inp = $(isFb ? "#ai_fb_model" : "#ai_model");
+      if (inp && d.m) {
+        inp.value = d.m;
+        inp.focus();
+        toast(`Selected "${d.m}". Press Save and test all to verify and save.`, "ok");
+      }
+      return;
+    }
+    if (a === "aifix") {
+      const isFb = d.role === "fallback";
+      if (d.fix === "key") {
+        const ki = $(isFb ? "#ai_fb_key" : "#ai_key");
+        ki?.scrollIntoView({behavior: "smooth", block: "center"});
+        ki?.focus();
+        return;
+      }
+      const btn = $(isFb ? '[data-act="aimodels"][data-target="fb"]' : '[data-act="aimodels"]:not([data-target])');
+      if (btn) btn.click();
+      return;
+    }
     if (a === "aimodels") {
       const origHtml = b.innerHTML;
       b.disabled = true;
@@ -2389,8 +2488,17 @@ document.addEventListener("click", async e => {
       try {
         const r = await send("/api/ai/models", {provider: prov, base_url: base, key});
         $(isFb ? "#ai_fb_models" : "#ai_models").innerHTML = r.models.map(m => `<option value="${esc(m)}">`).join("");
-        toast(r.models.length ? `${r.models.length} models found. Click the model box to pick one.` : "The service listed no models. Type the model yourself.", r.models.length ? "ok" : "");
+        const pref = r.models.filter(m => /flash|free|mini|haiku|llama|qwen/i.test(m) && !/tts|image|vision|audio|embedding|live/i.test(m));
+        S.aiFoundModels = {...(S.aiFoundModels || {}), [isFb ? "fb" : "main"]: (pref.length ? pref : r.models).slice(0, 10)};
+        S.aiBanner = null;
+        if ($("#ai_alert")) $("#ai_alert").innerHTML = renderAiAlert();
+        if ($("#ai_health") && S.ai?.checks) $("#ai_health").innerHTML = renderAiChecks(S.ai.checks);
+        toast(r.models.length ? `${r.models.length} models found. Pick a chip above or click the Model box.` : "The service listed no models. Type the model yourself.", r.models.length ? "ok" : "");
         if (r.models.length) $(isFb ? "#ai_fb_model" : "#ai_model").focus();
+      } catch (err) {
+        S.aiBanner = {kind: "bad", title: "Could not fetch model list", body: err.message};
+        if ($("#ai_alert")) $("#ai_alert").innerHTML = renderAiAlert();
+        toast(err.message, "bad");
       } finally { b.disabled = false; b.innerHTML = origHtml; }
       return;
     }
@@ -2404,16 +2512,20 @@ document.addEventListener("click", async e => {
       const splitMs = s => (s || "").split(",").map(x => x.trim()).filter(Boolean).slice(0, 5);
       const provLabel = id => S.ai?.providers?.find(x => x.id === id)?.label || id;
       try {
+        S.aiBanner = null;
+        if ($("#ai_alert")) $("#ai_alert").innerHTML = renderAiAlert();
         if (a === "aisave") {
           b.innerHTML = `<i class="btn-spin"></i>Saving settings…`;
           if (localSlot) localSlot.innerHTML = renderAiProg({text: "Saving AI configuration…", right: "Step 0", pct: 8});
           const fbProv = $("#ai_fb_provider")?.value || "";
-          S.ai = await send("/api/ai", {
+          const savedAi = await send("/api/ai", {
             provider: $("#ai_provider").value, models: $("#ai_model").value, base_url: $("#ai_base").value, key: $("#ai_key").value,
             fallback_provider: fbProv, fallback_models: fbProv ? $("#ai_fb_model").value : "",
             fallback_base_url: fbProv ? $("#ai_fb_base").value : "", fallback_key: fbProv ? $("#ai_fb_key").value : ""
           }, "PUT");
-          if (S.ai) S.ai.checks = aiEffectiveChecks(S.ai);
+          S.aiStaleServer = !Array.isArray(savedAi?.checks);
+          S.ai = savedAi;
+          if (S.ai) S.ai.checks = aiMergeChecks(aiEffectiveChecks(S.ai), S.aiLastChecks);
         }
         const steps = [];
         if (scope === "primary" || scope === "all") {
@@ -2433,8 +2545,8 @@ document.addEventListener("click", async e => {
         }
         const other = (S.ai?.checks || []).filter(c => scope === "all" ? false : c.role !== scope);
         const liveRows = (scope === "fallback"
-          ? [...other, ...steps.map(s => ({role: s.role, provider: s.provider, label: s.label, model: s.model, ready: true, state: "queued", ms: null, at: null, error: ""}))]
-          : [...steps.map(s => ({role: s.role, provider: s.provider, label: s.label, model: s.model, ready: true, state: "queued", ms: null, at: null, error: ""})), ...other]
+          ? [...other, ...steps.map(s => ({role: s.role, provider: s.provider, label: s.label, model: s.model, ready: true, state: "queued", ms: null, at: null, error: "", fix: "", detail: "", action: ""}))]
+          : [...steps.map(s => ({role: s.role, provider: s.provider, label: s.label, model: s.model, ready: true, state: "queued", ms: null, at: null, error: "", fix: "", detail: "", action: ""})), ...other]
         ).map((r, idx) => ({...r, order: idx + 1}));
 
         const results = [];
@@ -2457,9 +2569,16 @@ document.addEventListener("click", async e => {
           let stepRes = null;
           try {
             const got = await send("/api/ai/test", {detailed: true, scope: stp.role, draft: {provider: stp.provider, models: stp.model, base_url: stp.base_url, key: stp.key}});
-            stepRes = got?.results?.[0] || {role: stp.role, provider: stp.provider, label: stp.label, model: stp.model, ok: !!got?.ok, state: got?.ok ? "operational" : "error", ms: Math.round(performance.now() - t0), at: Date.now() / 1000, error: got?.primary_error || got?.fallback_error || ""};
+            if (got?.results?.[0]) {
+              stepRes = got.results[0];
+            } else {
+              const ok = !!got?.ok;
+              const diag = ok ? {error: "", fix: "", detail: "", action: ""} : aiGuessDiag(got?.primary_error || got?.fallback_error || "No response", stp.label, stp.model);
+              stepRes = {role: stp.role, provider: stp.provider, label: stp.label, model: stp.model, ok, state: ok ? "operational" : "error", ms: Math.round(performance.now() - t0), at: Date.now() / 1000, ...diag};
+            }
           } catch (err) {
-            stepRes = {role: stp.role, provider: stp.provider, label: stp.label, model: stp.model, ok: false, state: "error", ms: Math.round(performance.now() - t0), at: Date.now() / 1000, error: err.message};
+            const diag = aiGuessDiag(err.message, stp.label, stp.model);
+            stepRes = {role: stp.role, provider: stp.provider, label: stp.label, model: stp.model, ok: false, state: "error", ms: Math.round(performance.now() - t0), at: Date.now() / 1000, ...diag};
           } finally {
             clearInterval(timer); timer = null;
           }
@@ -2470,23 +2589,41 @@ document.addEventListener("click", async e => {
           if (localSlot) localSlot.innerHTML = i + 1 < steps.length ? renderAiProg(doneProg) : "";
         }
 
+        S.aiLastChecks = liveRows.map(r => ({...r}));
+        const failed = results.filter(x => !x.ok);
+        if (failed.length) {
+          const names = failed.map(x => `${x.role === "fallback" ? "Fallback" : "Main"} (${x.label} · ${x.model})`).join(", ");
+          S.aiBanner = {
+            kind: "bad",
+            title: `${failed.length} of ${results.length} connection test${results.length === 1 ? "" : "s"} failed`,
+            body: `Problem on ${names}. Review the red card${failed.length > 1 ? "s" : ""} below and use the quick-fix button to resolve it.`,
+          };
+        } else {
+          S.aiBanner = null;
+        }
+
         S.status = await api("/api/status"); drawShell();
-        if (a === "aisave" || scope === "all") await drawSettings();
-        else {
+        if (a === "aisave") {
+          await drawSettings();
+        } else {
           if (S.ai) S.ai.checks = liveRows;
+          if ($("#ai_alert")) $("#ai_alert").innerHTML = renderAiAlert();
           if ($("#ai_health")) $("#ai_health").innerHTML = renderAiChecks(liveRows);
-          if ($("#ai_top_state") && S.status?.ai?.ready) {
-            const sa = S.status.ai;
-            const fbNote = sa.fallback_provider ? ` · Fallback: ${sa.fallback_provider} (${sa.fallback_model || ""})` : "";
-            $("#ai_top_state").innerHTML = `${aiStatePill(sa.main_state || "untested", "Main")}${sa.fallback_provider ? aiStatePill(sa.fallback_state || "untested", "Fallback") : ""}<span class="sub">${esc(sa.provider)} · ${esc((sa.model || "") + fbNote)}</span>`;
+          if ($("#ai_top_state") && S.ai) {
+            const mainSt = aiRoleStateFromChecks("primary", liveRows);
+            const fbSt = aiRoleStateFromChecks("fallback", liveRows);
+            const fbNote = S.ai.fallback?.provider ? ` · Fallback: ${S.ai.fallback.label || S.ai.fallback.provider} (${S.ai.fallback.models?.[0] || ""})` : "";
+            $("#ai_top_state").innerHTML = `${aiStatePill(mainSt !== "off" ? mainSt : "untested", "Main")}${fbSt !== "off" ? aiStatePill(fbSt, "Fallback") : ""}<span class="sub">${esc(S.ai.label || S.ai.provider)} · ${esc((S.ai.models?.[0] || "") + fbNote)}</span>`;
           }
         }
         const passed = results.filter(x => x.ok).length;
         const prefix = a === "aisave" ? "Saved. " : "";
         if (passed === results.length && results.length) toast(`${prefix}All ${passed} model${passed === 1 ? "" : "s"} operational (${results.map(x => `${x.model} ${x.ms}ms`).join(", ")}).`, "ok");
-        else if (passed > 0) toast(`${prefix}${passed} of ${results.length} models operational. See red card for details.`, "bad");
-        else toast(`${prefix}Connection test failed: ${results[0]?.error || "no response"}`, "bad");
+        else if (passed > 0) toast(`${prefix}${passed} of ${results.length} models operational. Error details kept on page.`, "bad");
+        else toast(`${prefix}Connection test failed — full error kept on page below.`, "bad");
       } catch (err) {
+        S.aiBanner = {kind: "bad", title: a === "aisave" ? "Could not save AI settings" : "Could not run connection test", body: err.message};
+        if ($("#ai_alert")) $("#ai_alert").innerHTML = renderAiAlert();
         toast(`${a === "aisave" ? "Save failed: " : "Test failed: "}${err.message}`, "bad");
       } finally {
         if (timer) clearInterval(timer);
