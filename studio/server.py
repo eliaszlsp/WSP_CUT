@@ -1304,7 +1304,7 @@ def ai_models(request: Request, body: dict = Body(default={})):
 @app.post("/api/ai/test")
 def ai_test(request: Request, body: dict = Body(default={})):
     _admin(request)
-    _throttle("aitest:" + ctx.uid(), 30, 600)
+    _throttle("aitest:" + ctx.uid(), 120, 600)
     b = body if isinstance(body, dict) else {}
     detailed = bool(b.get("detailed"))
     scope = b.get("scope") or "all"
