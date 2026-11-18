@@ -135,6 +135,10 @@ check("status reports fallback provider and model",
 check("neither primary nor fallback key ever leaves the server",
       any(k in t for k in (KEY, OR_KEY) for t in (r_fb.text, c.get("/api/ai").text, c.get("/api/status").text)), False)
 check("unconfigured provider still requires its own key", put({"provider": "openai", "models": "m"}).status_code, 400)
+app_html = c.get("/app").text
+check("the dashboard includes fallback AI controls",
+      all(tok in app_html for tok in ('id="ai_fb_provider"', 'id="ai_fb_model"', 'id="ai_fb_key"', 'id="ai_fb_base"', 'data-target="fb"')),
+      True)
 
 print("ALL PASSED" if not fails else f"{len(fails)} failed")
 import shutil  # noqa: E402
