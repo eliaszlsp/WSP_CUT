@@ -1302,15 +1302,25 @@ def ai_models(request: Request, body: dict = Body(default={})):
 
 
 @app.post("/api/ai/test")
-def ai_test(request: Request):
+def ai_test(request: Request, body: dict = Body(default={})):
     _admin(request)
-    _throttle("aitest:" + ctx.uid(), 20, 600)
+    _throttle("aitest:" + ctx.uid(), 30, 600)
+    b = body if isinstance(body, dict) else {}
+    detailed = bool(b.get("detailed"))
+    scope = b.get("scope") or "all"
+    draft = b.get("draft") if isinstance(b.get("draft"), dict) else None
+    extra_k = str((draft or {}).get("key") or "")
     try:
-        return ai.test()
+        res = ai.test(scope=scope, draft=draft, raise_on_fail=not detailed)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(502, ai.explain(e) or "The AI did not answer: " + _ai_error(e))
+        usage.forget_all()
+        ctx.bump()
+        raise HTTPException(502, ai.explain(e) or "The AI did not answer: " + _ai_error(e, extra_k))
+    usage.forget_all()
+    ctx.bump()
+    return res
 
 
 # ================================================================ posting, accounts, settings

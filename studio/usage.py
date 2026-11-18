@@ -60,17 +60,21 @@ def brief() -> dict:
     with db.engine.connect() as c:
         today = c.execute(sa.select(sa.func.count(), sa.func.coalesce(sa.func.sum(_tokens()), 0)).where(
             u.user_id == uid, u.t >= midnight)).first()
-    c_ok, fb = ai._slot_ready(ai.current()), ai.fallback()
+    c_ok, fb, rows = ai._slot_ready(ai.current()), ai.fallback(), ai.health_rows()
     if c_ok:
         prov_lbl, mod_id = ai.label(), (ai.models() or [""])[0]
         fb_lbl = fb["label"] if fb["ready"] else ""
         fb_mod = (fb["models"] or [""])[0] if fb["ready"] else ""
+        main_st, fb_st = ai.role_state("primary", rows), ai.role_state("fallback", rows)
     elif fb["ready"]:
         prov_lbl, mod_id, fb_lbl, fb_mod = fb["label"], fb["models"][0], "", ""
+        main_st, fb_st = ai.role_state("fallback", rows), "off"
     else:
         prov_lbl, mod_id, fb_lbl, fb_mod = ai.label(), (ai.models() or [""])[0], "", ""
+        main_st, fb_st = "off", "off"
     out = {"ready": ai.ready(), "provider": prov_lbl, "model": mod_id,
            "fallback_provider": fb_lbl, "fallback_model": fb_mod,
+           "main_state": main_st, "fallback_state": fb_st,
            "today_calls": int(today[0]), "today_tokens": int(today[1]),
            "problem": ai.problem["text"] if ai.problem["text"] and now - ai.problem["at"] < 6 * 3600 else ""}
     _brief[uid] = (now, out)

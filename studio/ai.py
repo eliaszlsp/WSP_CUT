@@ -12,10 +12,12 @@ The others are told the schema in the prompt and asked for a JSON object, which 
 One picture can also be shown (`see`), which is how the webcam is looked for on a gaming stream. A model that
 cannot look at pictures answers with something else, and that is simply taken as "it did not look"."""
 import base64
+import hashlib
 import json
 import os
 import re
 import threading
+import time
 
 import httpx
 
@@ -38,6 +40,7 @@ NO_KEY = {"ollama", "custom"}       # a model running on your own machine needs 
 # ---------------------------------------------------------------- the settings in use
 _lock = threading.Lock()
 _saved = {"at": None, "data": {}}
+_health: dict = {}      # (provider, model, cred_fingerprint) -> {"state", "ok", "ms", "at", "error"}
 
 
 def _file():
@@ -203,10 +206,63 @@ def _hint(k: str) -> str:
     return k[-4:] if len(k) >= 12 else ""
 
 
+def _fp(cfg: dict) -> str:
+    addr = cfg.get("address") or cfg.get("base_url") or PROVIDERS.get(cfg["provider"], ("", ""))[1]
+    return hashlib.sha256(f"{cfg['provider']}|{addr}|{cfg.get('key', '')}".encode("utf-8")).hexdigest()[:12]
+
+
+def record_health(provider_id: str, model: str, ok: bool, ms: int = 0, error=None, cfg: dict | None = None, extra_key: str = "") -> dict:
+    """Remember whether one (provider, model) answered and how fast, keyed by a hash of its address and key."""
+    cfg = cfg or _cfg_for(provider_id)
+    err = ""
+    if not ok:
+        raw = explain(error, provider_id=cfg["provider"], model=model) or redact(error)
+        ek = str(extra_key or "").strip()
+        if ek:
+            raw = raw.replace(ek, "<key>")
+        err = raw[:200]
+    rec = {"state": "operational" if ok else "error", "ok": bool(ok), "ms": max(0, int(ms)), "at": time.time(), "error": err}
+    with _lock:
+        _health[(cfg["provider"], model, _fp(cfg))] = rec
+    return rec
+
+
+def health_rows() -> list[dict]:
+    """Connection status for every configured primary and fallback model, in execution order."""
+    c, fb = current(), fallback()
+    rows = []
+    for role, slot in (("primary", c), ("fallback", fb)):
+        p = slot["provider"]
+        if not p or p not in PROVIDERS or not slot["models"]:
+            continue
+        slot_ok = _slot_ready(slot)
+        cfg = {**slot, "address": slot["base_url"] or PROVIDERS[p][1], "label": PROVIDERS[p][0], "how": PROVIDERS[p][2]}
+        fp = _fp(cfg)
+        for m in slot["models"]:
+            rec = _health.get((p, m, fp))
+            state = "incomplete" if not slot_ok else (rec["state"] if rec else "untested")
+            rows.append({"order": len(rows) + 1, "role": role, "provider": p, "label": cfg["label"], "model": m,
+                         "ready": slot_ok, "state": state, "ms": rec["ms"] if rec else None,
+                         "at": rec["at"] if rec else None, "error": rec["error"] if rec else ""})
+    return rows
+
+
+def role_state(role: str, rows: list[dict] | None = None) -> str:
+    rs = [r for r in (health_rows() if rows is None else rows) if r["role"] == role]
+    if not rs or not any(r["ready"] for r in rs):
+        return "off"
+    if any(r["state"] == "operational" for r in rs):
+        return "operational"
+    if all(r["state"] == "error" for r in rs):
+        return "error"
+    return "untested"
+
+
 def public() -> dict:
     """What the settings page may see. Keys never leave the server: only whether there is one, and
     its last four characters so the owner can tell which key it is."""
     c, fb, profs = current(), fallback(), _profiles()
+    checks = health_rows()
     saved_public = {pid: {"models": v["models"], "base_url": v["base_url"],
                           "has_key": bool(v["key"]), "key_hint": _hint(v["key"])}
                     for pid, v in profs.items()}
@@ -215,6 +271,9 @@ def public() -> dict:
             "saved_here": bool(_from_dashboard().get("provider")),
             "fallback": {"provider": fb["provider"], "models": fb["models"], "base_url": fb["base_url"],
                          "has_key": bool(fb["key"]), "key_hint": _hint(fb["key"]), "ready": fb["ready"], "label": fb["label"]},
+            "checks": checks,
+            "main_state": role_state("primary", checks),
+            "fallback_state": role_state("fallback", checks),
             "saved_profiles": saved_public,
             "providers": [{"id": k, "label": v[0], "address": v[1], "needs_key": k not in NO_KEY, "key_url": v[3], "example": v[4]}
                           for k, v in PROVIDERS.items()]}
@@ -342,27 +401,98 @@ def list_models(provider_id=None, address=None, with_key=None) -> list:
     return sorted({m for m in found if m})[:400]
 
 
-def test() -> dict:
-    """One tiny request with the settings in use, to prove the key, the address and the model all work."""
-    c, fb = current(), fallback()
-    c_ready = _slot_ready(c)
-    if not c_ready and not fb["ready"]:
-        raise ValueError("Save a service, a model and a key first.")
+def _draft_slot(draft: dict) -> tuple[dict, str]:
+    p = _norm(draft.get("provider"))
+    if p not in PROVIDERS:
+        raise ValueError("Choose one of the AI services in the list.")
+    profs, old = _profiles(), current()
+    saved = profs.get(p, {})
+    raw_ms = draft.get("models")
+    if raw_ms is None or (isinstance(raw_ms, str) and not raw_ms.strip()) or raw_ms == []:
+        raw_ms = saved.get("models") or (old["models"] if old["provider"] == p else [])
+    ms = _clean_models(raw_ms, "Enter the model to test.")
+    raw_addr = draft.get("base_url")
+    addr = _clean_address(p, saved.get("base_url", "") if raw_addr is None else raw_addr, "A")
+    typed_k = str(draft.get("key") or "").strip()[:400]
+    k = typed_k or saved.get("key", "") or (old["key"] if old["provider"] == p else "")
+    if not k and p not in NO_KEY:
+        raise ValueError("Paste the key for this service first.")
+    if k and len(k) < 8:
+        raise ValueError("That key looks too short. Paste the full key from the service.")
+    cfg = {"provider": p, "models": ms, "base_url": addr, "key": k,
+           "address": addr or PROVIDERS[p][1], "label": PROVIDERS[p][0], "how": PROVIDERS[p][2]}
+    return cfg, typed_k
+
+
+def test(scope: str = "all", draft: dict | None = None, raise_on_fail: bool = True) -> dict:
+    """Test configured (or draft) AI models independently, recording each model's live operational status."""
+    scope = str(scope or "all").strip().lower()
+    if scope not in ("all", "primary", "fallback"):
+        raise ValueError("Unknown test scope.")
+    plan: list[tuple[str, dict, list[str], str]] = []
+    if isinstance(draft, dict) and draft.get("provider"):
+        role = "fallback" if scope == "fallback" else "primary"
+        dcfg, typed_k = _draft_slot(draft)
+        plan.append((role, dcfg, dcfg["models"], typed_k))
+    else:
+        c, fb = current(), fallback()
+        c_ready, fb_ready = _slot_ready(c), fb["ready"]
+        if scope == "primary":
+            if not c_ready:
+                raise ValueError("Save a service, a model and a key first.")
+            plan.append(("primary", _cfg_for(c["provider"]), c["models"], ""))
+        elif scope == "fallback":
+            if not fb_ready:
+                raise ValueError("Choose a fallback service, a model and a key first.")
+            plan.append(("fallback", _cfg_for(fb["provider"]), fb["models"], ""))
+        else:
+            if not c_ready and not fb_ready:
+                raise ValueError("Save a service, a model and a key first.")
+            if c_ready:
+                plan.append(("primary", _cfg_for(c["provider"]), c["models"], ""))
+            if fb_ready:
+                plan.append(("fallback", _cfg_for(fb["provider"]), fb["models"], ""))
+
     schema = {"type": "ARRAY", "items": {"type": "STRING"}}
     prompt = 'Answer with a JSON array that holds the single string "ok".'
-    active = c if c_ready else fb
-    out, sent, wrote = call(active["models"][0], prompt, schema, provider_id=active["provider"])
-    fb_ok, fb_model, fb_err = None, "", ""
-    if c_ready and fb["ready"]:
-        fb_model = fb["models"][0]
-        try:
-            call(fb_model, prompt, schema, provider_id=fb["provider"])
-            fb_ok = True
-        except Exception as e:  # noqa: BLE001
-            fb_ok = False
-            fb_err = explain(e, fb["provider"], fb_model) or redact(str(e))[:160]
-    return {"ok": True, "model": active["models"][0], "tokens": sent + wrote, "answer": str(out)[:80],
-            "fallback_ok": fb_ok, "fallback_model": fb_model, "fallback_error": fb_err}
+    fn_map = {"gemini": _gemini, "openai": _openai, "anthropic": _anthropic}
+    results = []
+    total_tokens, first_ans, first_exc = 0, "", None
+    for role, cfg, ms, extra_k in plan:
+        for m in ms:
+            t0 = time.monotonic()
+            try:
+                out, sent, wrote = fn_map[cfg["how"]](m, prompt, schema, 35, cfg)
+                elapsed = round((time.monotonic() - t0) * 1000)
+                rec = record_health(cfg["provider"], m, True, elapsed, cfg=cfg)
+                total_tokens += sent + wrote
+                if not first_ans:
+                    first_ans = str(out)[:80]
+            except Exception as e:  # noqa: BLE001
+                elapsed = round((time.monotonic() - t0) * 1000)
+                rec = record_health(cfg["provider"], m, False, elapsed, error=e, cfg=cfg, extra_key=extra_k)
+                if first_exc is None and (role == "primary" or scope == "fallback"):
+                    first_exc = e
+            results.append({"order": len(results) + 1, "role": role, "provider": cfg["provider"], "label": cfg["label"],
+                            "model": m, "ok": rec["ok"], "state": rec["state"], "ms": rec["ms"], "at": rec["at"], "error": rec["error"]})
+
+    prim_rows = [r for r in results if r["role"] == "primary"]
+    fb_rows = [r for r in results if r["role"] == "fallback"]
+    main_rows = fb_rows if scope == "fallback" or not prim_rows else prim_rows
+    main_ok = any(r["ok"] for r in main_rows)
+    any_ok = any(r["ok"] for r in results)
+    if any_ok:
+        clear_problem()
+    if raise_on_fail and not main_ok and first_exc is not None:
+        raise first_exc
+    chosen_model = next((r["model"] for r in main_rows if r["ok"]), main_rows[0]["model"] if main_rows else "")
+    prim_err = next((r["error"] for r in prim_rows if not r["ok"]), "")
+    fb_ok = (any(r["ok"] for r in fb_rows)) if (fb_rows and prim_rows) else None
+    fb_model = next((r["model"] for r in fb_rows if r["ok"]), fb_rows[0]["model"] if fb_rows else "")
+    fb_err = next((r["error"] for r in fb_rows if not r["ok"]), "")
+    return {"ok": main_ok, "any_ok": any_ok, "model": chosen_model, "tokens": total_tokens, "answer": first_ans,
+            "primary_error": prim_err, "fallback_ok": fb_ok, "fallback_model": fb_model, "fallback_error": fb_err,
+            "results": results, "checks": health_rows()}
 
 
 class AIError(RuntimeError):
@@ -556,9 +686,13 @@ def see(prompt: str, image: bytes, timeout: float | None = None) -> tuple[str, i
             call_to = max(2.0, rem / min(left, 3)) if left > 1 else rem
         else:
             call_to = None
+        t0 = time.monotonic()
         try:
-            return _see_one(_cfg_for(pid), model, prompt, b64, call_to)
+            res = _see_one(_cfg_for(pid), model, prompt, b64, call_to)
+            record_health(pid, model, True, round((time.monotonic() - t0) * 1000))
+            return res
         except Exception as e:  # noqa: BLE001
+            record_health(pid, model, False, round((time.monotonic() - t0) * 1000), error=e)
             last = e
             s = str(e).lower()
             if "http 401" in s or "http 403" in s or "connect" in s or "refused" in s or "nameresolution" in s:
