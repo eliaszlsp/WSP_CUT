@@ -674,7 +674,7 @@ class Session:
         if long_mode in ("compile", "both"):
             avail = [
                 c for c in clips_copy
-                if c.get("format", "9:16") != "16:9" and c.get("clip_kind") != "long"
+                if c.get("format", "9:16") != "16:9" and c.get("clip_kind") not in ("long", "series")
                 and c.get("status") != "error"
                 and c["start"] >= buf_start - 2 and c["end"] <= buf_end + 2
             ]

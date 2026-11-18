@@ -797,7 +797,7 @@ try:
 
         uploaded_social = []
 
-        def fake_yt_upload(acc, path, title, desc, tags, privacy):
+        def fake_yt_upload(acc, path, title, desc, tags, privacy, **kw):
             uploaded_social.append((acc["id"], Path(path).read_bytes(), title))
             return f"vid_{acc['id']}", f"https://youtube.com/shorts/vid_{acc['id']}"
 

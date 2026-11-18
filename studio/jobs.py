@@ -987,7 +987,7 @@ def _apply_long_and_derived(job, words, db, span, lo, game, notes, face=None):
                 version=0,
             )
             if face:
-                b["facecam"] = face
+                comp["facecam"] = face
             job["clips"].append(comp)
             enqueued.append(comp)
     return enqueued, tokens, model
