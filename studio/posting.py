@@ -73,22 +73,47 @@ def _next_slot(account_id, gap_min, cap):
     return t
 
 
+def platform_gap(platform: str, gap_min: int) -> int:
+    """Minimum safe gap in minutes between posts on a given platform."""
+    if platform in ("tiktok", "instagram"):
+        return max(30, int(gap_min))
+    if platform == "youtube":
+        return max(20, int(gap_min))
+    return max(5, int(gap_min))
+
+
+def clip_priority(clip: dict) -> int:
+    """Queue priority: 1 for 16:9 long video, 2 for derived short, 3 for standalone clip."""
+    if clip.get("format") == "16:9":
+        return 1
+    if clip.get("parent_clip"):
+        return 2
+    return 3
+
+
 def enqueue(job, clip, account_ids, now=False) -> list:
     c = creators.get(job["creator"]) or creators.DEFAULTS
     made = []
+    prio = clip_priority(clip)
+    fmt = clip.get("format", "9:16")
     with _lock:
         for aid in account_ids:
             acc = accounts.get(aid)
             if not acc:
                 continue
+            if fmt == "16:9" and acc["platform"] != "youtube":
+                continue
             if any(p["job"] == job["id"] and p["clip"] == clip["id"] and p["account"] == aid
                    and p["status"] in OPEN + ("posted",) for p in _mine()):
                 continue  # never post the same clip to the same account twice
-            due = time.time() if now else _next_slot(aid, c["post_gap_min"], c["daily_cap"])
+            eff_gap = platform_gap(acc["platform"], c["post_gap_min"])
+            due = time.time() if now else _next_slot(aid, eff_gap, c["daily_cap"])
             p = {"id": secrets.token_hex(8), "user": ctx.uid(), "job": job["id"], "clip": clip["id"], "creator": job["creator"],
                  "account": aid, "account_name": acc["name"], "platform": acc["platform"], "status": "scheduled",
                  "due_at": due, "created": time.time(), "title": clip.get("title") or clip.get("hook") or "Clip",
-                 "score": clip.get("score", 0), "tries": 0, "url": "", "remote_id": "", "error": None, "views": None}
+                 "score": clip.get("score", 0), "tries": 0, "url": "", "remote_id": "", "error": None, "views": None,
+                 "series_id": clip.get("series_id"), "part_index": clip.get("part_index"),
+                 "priority": prio, "format": fmt}
             _posts.append(p)
             made.append(p)
         _save()
@@ -97,10 +122,31 @@ def enqueue(job, clip, account_ids, now=False) -> list:
     return made
 
 
+def enqueue_series(job, clips: list[dict], account_ids: list[str]) -> list:
+    """Enqueue multi-part series clips in strict part_index order (Part 1 -> Part 2 -> ...)."""
+    ordered = sorted(clips, key=lambda k: k.get("part_index") or 0)
+    made = []
+    for clip in ordered:
+        made.extend(enqueue(job, clip, account_ids))
+    return made
+
+
 def on_clip_ready(job, clip):
     """Called once when a clip first finishes rendering."""
     c = creators.get(job["creator"])
     if not c or not c["autopost"] or not c["accounts"]:
+        return
+    if clip.get("clip_kind") == "series":
+        return  # series parts are enqueued in strict 1..N order by enqueue_series
+    if clip.get("clip_kind") == "long":
+        if clip.get("score", 0) < c.get("long_min_score", 70):
+            return
+        yt_accs = [aid for aid in c["accounts"] if (accounts.get(aid) or {}).get("platform") == "youtube"]
+        if not yt_accs:
+            return
+        made = enqueue(job, clip, yt_accs)
+        if made:
+            creators.log(c["id"], f"Queued long YouTube video for {len(made)} account(s): {clip.get('title') or clip.get('hook')}")
         return
     if clip.get("score", 0) < c["post_min_score"]:
         return  # includes hand-made clips (score 0): those wait for you to press Post
@@ -132,8 +178,10 @@ def _post(p):
             raise RuntimeError("The clip file is no longer available.")
         creator = creators.get(job["creator"]) or dict(creators.DEFAULTS, name="clips")
         title, cap = clip.get("title") or clip.get("hook") or "Clip", _caption(clip, creator)
+        is_short = (clip.get("clip_kind") != "long") and ((clip.get("end", 0) - clip.get("start", 0)) <= 180)
         if acc["platform"] == "youtube":
-            rid, url = accounts.youtube_upload(acc, path, title, cap + "\n\n#Shorts", clip.get("hashtags", []), creator["privacy"])
+            yt_desc = (cap + "\n\n#Shorts") if is_short else cap
+            rid, url = accounts.youtube_upload(acc, path, title, yt_desc, clip.get("hashtags", []), creator["privacy"], is_short=is_short)
         elif acc["platform"] == "instagram":
             rid, url = accounts.instagram_upload(acc, path, f"{title}\n\n{cap}", job["id"] if fname else "", clip_name=fname)
         elif acc["platform"] == "tiktok":
@@ -161,12 +209,39 @@ def _post(p):
             gdrive.on_clip_posted(p["user"], p["job"], p["clip"])
 
 
+def _series_blocked(p) -> bool:
+    """True if an earlier part in the same series for the same account hasn't been posted yet,
+    or if this clip is still rendering."""
+    with ctx.as_user(p["user"]):
+        job = jobs.get(p["job"])
+        clip = next((c for c in job["clips"] if c["id"] == p["clip"]), None) if job else None
+    if clip and clip.get("status") in ("queued", "rendering"):
+        return True
+    sid, idx = p.get("series_id"), p.get("part_index")
+    if not sid or not idx or idx <= 1:
+        return False
+    with _lock:
+        for other in _posts:
+            if (other.get("user") == p.get("user")
+                    and other.get("account") == p.get("account")
+                    and other.get("series_id") == sid
+                    and (other.get("part_index") or 0) < idx
+                    and other.get("status") in ("scheduled", "posting", "failed")):
+                return True
+    return False
+
+
 def _run():
     while True:
         time.sleep(15)
-        due = [p for p in list(_posts) if p["status"] == "scheduled" and p["due_at"] <= time.time() and p.get("user")]
+        due = sorted(
+            (p for p in list(_posts) if p["status"] == "scheduled" and p["due_at"] <= time.time() and p.get("user")),
+            key=lambda p: (p.get("priority", 3), p.get("due_at", 0), p.get("created", 0)),
+        )
         for p in due:
             try:
+                if _series_blocked(p):
+                    continue
                 with ctx.as_user(p["user"]):
                     if accounts.settings()["paused"]:
                         continue
@@ -249,7 +324,8 @@ def overview() -> dict:
     names = {c["id"]: c["name"] for c in all_cs}
     queue = sorted((p for p in _posts if p["status"] in OPEN), key=lambda p: p["due_at"])
     done = sorted((p for p in _posts if p["status"] in ("posted", "failed")), key=lambda p: -(p.get("posted_at") or p["due_at"]))[:15]
-    show = [{**{k: v for k, v in p.items() if k != "user"}, "creator_name": names.get(p["creator"], "")} for p in queue + done]
+    show = [{**{k: v for k, v in p.items() if k != "user"}, "creator_name": names.get(p["creator"], ""),
+             "priority": p.get("priority", 3), "format": p.get("format", "9:16")} for p in queue + done]
     # last 14 days, oldest first, for the home graph
     days = [_day(time.time() - 86400 * i) for i in range(13, -1, -1)]
     made, posted, views = {d: 0 for d in days}, {d: 0 for d in days}, {d: 0 for d in days}

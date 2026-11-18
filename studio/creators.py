@@ -21,7 +21,10 @@ DEFAULTS = {"name": "", "channel": "", "style": "bounce", "layout": "blur", "cap
             "game": "",
             "trigger_words": "clip that, clip it, clipa isso",
             "autopost": False, "accounts": [], "post_min_score": 75, "post_gap_min": 45, "daily_cap": 6,
-            "privacy": "public", "post_footer": "", "rate_per_1k": 0.0, "channels": {}}
+            "privacy": "public", "post_footer": "", "rate_per_1k": 0.0, "channels": {},
+            "long_enabled": False, "long_mode": "off", "long_min_len": 600, "long_max_len": 1200, "long_every_min": 20, "long_min_score": 70,
+            "derive_shorts": True, "thumb_mode": "local",
+            "series_enabled": False, "series_part_min": 60, "series_part_max": 90}
 PLATFORMS = ("youtube", "twitch", "kick")
 
 
@@ -42,8 +45,10 @@ def _fix(c: dict) -> dict:
     if c.get("channel") not in ch.values():
         c["channel"] = next((ch[k] for k in PLATFORMS if k in ch), "")
     return c
-NUMERIC = {"min_len": (5, 120), "max_len": (10, 180), "max_clips": (1, 20), "min_score": (0, 100), "buffer_min": (5, 120), "live_per_hour": (1, 60), "ai_every_min": (1, 30), "auto_jump_pct": (20, 300), "must_clip_min": (0, 240), "min_gap_min": (0, 60),
-           "post_min_score": (0, 100), "post_gap_min": (5, 1440), "daily_cap": (1, 50)}
+NUMERIC = {"min_len": (5, 120), "max_len": (10, 180), "max_clips": (1, 20), "min_score": (0, 100), "buffer_min": (5, 180), "live_per_hour": (1, 60), "ai_every_min": (1, 30), "auto_jump_pct": (20, 300), "must_clip_min": (0, 240), "min_gap_min": (0, 60),
+           "post_min_score": (0, 100), "post_gap_min": (5, 1440), "daily_cap": (1, 50),
+           "long_min_len": (300, 1200), "long_max_len": (600, 1800), "long_every_min": (10, 120), "long_min_score": (0, 100),
+           "series_part_min": (30, 150), "series_part_max": (45, 180)}
 
 
 def root(cid) -> Path:
@@ -67,8 +72,12 @@ def _clean(data: dict) -> dict:
         if k in NUMERIC:
             lo, hi = NUMERIC[k]
             v = max(lo, min(hi, int(float(v))))
-        elif k in ("auto_watch", "autopost", "ai_only_on_spike"):
+        elif k in ("auto_watch", "autopost", "ai_only_on_spike", "long_enabled", "series_enabled", "derive_shorts"):
             v = bool(v)
+        elif k == "long_mode":
+            v = v if v in ("off", "block", "compile", "both") else "off"
+        elif k == "thumb_mode":
+            v = v if v in ("local", "ai") else "local"
         elif k == "channels":
             v = {p: str(u).strip()[:300] for p, u in (v.items() if isinstance(v, dict) else []) if p in PLATFORMS and str(u).strip()}
         elif k == "accounts":
@@ -141,6 +150,8 @@ def create(data: dict) -> dict:
     c = _fix({**DEFAULTS, **_clean(data)})
     if not c["name"]:
         raise ValueError("Give the creator a name.")
+    if c["long_min_len"] >= c["long_max_len"]:
+        c["long_min_len"] = max(300, c["long_max_len"] - 60)
     slug = re.sub(r"[^a-z0-9]+", "-", c["name"].lower()).strip("-")[:40] or "creator"
     cid, n = slug, 2
     while root(cid).exists():
@@ -164,6 +175,10 @@ def update(cid, data: dict) -> dict:
     _fix(c)
     if c["min_len"] >= c["max_len"]:
         raise ValueError("Shortest clip must be shorter than longest clip.")
+    if c["long_min_len"] >= c["long_max_len"]:
+        raise ValueError("Shortest long video must be shorter than longest long video.")
+    if c["series_part_min"] >= c["series_part_max"]:
+        raise ValueError("Shortest series part must be shorter than longest series part.")
     _write(c)
     return c
 
