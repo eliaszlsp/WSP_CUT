@@ -301,6 +301,69 @@ with ctx.as_user(u1.id):
           br["ready"] and br["provider"] == "OpenRouter" and tst_fb_only["ok"] and tst_fb_only["model"] == "openrouter/free",
           str((br, tst_fb_only)))
 
+# ---- per-model connection health, independent fallback test, and fingerprint invalidation
+ai.save("gemini", "g-missing, g-working", "", "gem-secret-key-11112222",
+        fallback_provider="openrouter", fallback_models="openrouter/free", fallback_key="or-secret-key-33334444")
+pub_init = ai.public()
+check("newly saved models start as untested in checks",
+      [c["state"] for c in pub_init.get("checks", [])] == ["untested", "untested", "untested"],
+      str(pub_init.get("checks")))
+
+ai.httpx.post = lambda url, json=None, headers=None, timeout=None, **_k: (  # noqa: A002
+    Reply(404, {"error": {"message": "model g-missing not found"}}) if "g-missing" in url else
+    Reply(200, {"candidates": [{"content": {"parts": [{"text": '["ok"]'}]}}], "usageMetadata": {"promptTokenCount": 5, "totalTokenCount": 7}})
+    if "generativelanguage" in url else
+    Reply(200, {"choices": [{"message": {"content": '{"items":["ok"]}'}}], "usage": {"prompt_tokens": 6, "completion_tokens": 3}})
+)
+res_all = ai.test(scope="all", raise_on_fail=False)
+check("test(all) checks every primary and fallback model and records per-model health",
+      res_all["ok"] and res_all["fallback_ok"] is True and [r["state"] for r in res_all["results"]] == ["error", "operational", "operational"]
+      and all(isinstance(r["ms"], int) for r in res_all["results"]),
+      str(res_all))
+
+# Even when ALL primary models fail, fallback is still tested so the user knows backup is operational
+ai.httpx.post = lambda url, json=None, headers=None, timeout=None, **_k: (  # noqa: A002
+    Reply(429, {"error": {"message": "quota exhausted gem-secret-key-11112222"}}) if "generativelanguage" in url else
+    Reply(200, {"choices": [{"message": {"content": '{"items":["ok"]}'}}], "usage": {"prompt_tokens": 6, "completion_tokens": 3}})
+)
+res_prim_down = ai.test(scope="all", raise_on_fail=False)
+check("when primary is down, test(all) still verifies fallback is operational",
+      res_prim_down["ok"] is False and res_prim_down["fallback_ok"] is True and res_prim_down["any_ok"] is True
+      and [r["state"] for r in res_prim_down["results"]] == ["error", "error", "operational"]
+      and "gem-secret-key-11112222" not in json.dumps(res_prim_down),
+      str(res_prim_down))
+
+with ctx.as_user(u1.id):
+    usage.forget_all()
+    br_states = usage.brief()
+    check("usage.brief() exposes main_state=error and fallback_state=operational",
+          (br_states.get("main_state"), br_states.get("fallback_state")) == ("error", "operational"),
+          str(br_states))
+
+# Independent fallback-only test and draft key redaction
+seen.clear()
+ai.httpx.post = lambda url, json=None, headers=None, timeout=None, **_k: (  # noqa: A002
+    seen.append(url) or Reply(200, {"choices": [{"message": {"content": '{"items":["ok"]}'}}], "usage": {"prompt_tokens": 4, "completion_tokens": 2}})
+)
+res_fb = ai.test(scope="fallback", raise_on_fail=False)
+check("test(scope='fallback') only contacts fallback service",
+      res_fb["ok"] is True and len(res_fb["results"]) == 1 and res_fb["results"][0]["role"] == "fallback"
+      and all("openrouter.ai" in u for u in seen),
+      str((res_fb, seen)))
+
+ai.httpx.post = lambda url, json=None, headers=None, timeout=None, **_k: Reply(401, {"error": {"message": "bad draft-secret-key-55556666"}})  # noqa: A002
+res_draft = ai.test(scope="fallback", draft={"provider": "openrouter", "models": "openrouter/free", "key": "draft-secret-key-55556666"}, raise_on_fail=False)
+check("draft test redacts unsaved draft key on failure",
+      res_draft["ok"] is False and "draft-secret-key-55556666" not in json.dumps(res_draft),
+      str(res_draft))
+
+# Changing key resets health state back to untested
+pub_new_key = ai.save("gemini", "g-working", "", "gem-brand-new-key-99990000",
+                      fallback_provider="openrouter", fallback_models="openrouter/free", fallback_key=None)
+check("changing primary key resets primary to untested while keeping unchanged fallback operational",
+      [(c["role"], c["state"]) for c in pub_new_key["checks"]] == [("primary", "untested"), ("fallback", "operational")],
+      str(pub_new_key["checks"]))
+
 print("ALL PASSED" if not fails else f"{len(fails)} failed")
 import shutil  # noqa: E402
 db.engine.dispose()

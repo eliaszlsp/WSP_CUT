@@ -200,13 +200,16 @@ def ask_ai(prompt, schema=None, purpose="AI call", timeout=None):
                 call_to = max(2.0, rem / min(left, 3)) if left > 1 else rem
             else:
                 call_to = None
+            t0 = time.monotonic()
             try:
                 out, sent, wrote = ai.call(model, prompt, schema or SCHEMA, call_to, provider_id=prov)
+                ai.record_health(prov, model, True, round((time.monotonic() - t0) * 1000))
                 usage.record(sent, wrote, purpose)
                 ai.clear_problem()
                 used = model if prov == prim else f"{prov}:{model}"
                 return out, used, sent + wrote
             except Exception as e:  # noqa: BLE001
+                ai.record_health(prov, model, False, round((time.monotonic() - t0) * 1000), error=e)
                 last, last_prov, last_model = e, prov, model
                 if ("HTTP 429" in str(e) or "HTTP 5" in str(e)) and attempt + 1 < tries:
                     wait = min(4 * (attempt + 1), 6) if timeout else 4 * (attempt + 1)

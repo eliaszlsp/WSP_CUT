@@ -155,6 +155,24 @@ r_unsaved = post("/api/ai/models", {"provider": "openai", "key": "unsaved-typed-
 check("unsaved key typed into Find models is redacted on transport error",
       (r_unsaved.status_code, "unsaved-typed-key-99998888" in r_unsaved.text), (502, False))
 
+# ---- detailed connection test via /api/ai/test (primary down + fallback operational, and standalone fallback test)
+ai.httpx.post = lambda url, json=None, headers=None, timeout=None, **_k: (  # noqa: A002
+    Reply(403, {"error": {"message": "bad primary " + KEY}}) if "generativelanguage" in url else
+    Reply(200, {"choices": [{"message": {"content": '{"items":["ok"]}'}}], "usage": {"prompt_tokens": 5, "completion_tokens": 2}})
+)
+r_det = post("/api/ai/test", {"detailed": True, "scope": "all"})
+check("detailed test reports fallback operational even when primary fails",
+      (r_det.status_code, r_det.json().get("ok"), r_det.json().get("fallback_ok"), r_det.json().get("any_ok"), KEY in r_det.text),
+      (200, False, True, True, False))
+r_only_fb = post("/api/ai/test", {"detailed": True, "scope": "fallback"})
+check("standalone fallback test endpoint confirms fallback is operational",
+      (r_only_fb.status_code, r_only_fb.json().get("ok"), len(r_only_fb.json().get("results", []))),
+      (200, True, 1))
+app_html2 = c.get("/app").text
+check("dashboard includes connection status panel and per-service test buttons",
+      all(tok in app_html2 for tok in ('id="ai_health"', 'data-scope="primary"', 'data-scope="fallback"', 'data-scope="all"')),
+      True)
+
 print("ALL PASSED" if not fails else f"{len(fails)} failed")
 import shutil  # noqa: E402
 db.engine.dispose()
