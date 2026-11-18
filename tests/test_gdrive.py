@@ -13,13 +13,36 @@ import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-ROOT = Path(__file__).resolve().parent.parent
-TMP_BASE = ROOT / "data" / "tmp"
-TMP_BASE.mkdir(parents=True, exist_ok=True)
-os.environ["TEMP"] = os.environ["TMP"] = str(TMP_BASE)
+def _free_bytes(path: str | Path) -> int:
+    try:
+        return shutil.disk_usage(path).free
+    except OSError:
+        return 0
 
-DATA_DIR = Path(tempfile.mkdtemp(prefix="pc-gdrive-", dir=str(TMP_BASE)))
-atexit.register(lambda: shutil.rmtree(DATA_DIR, ignore_errors=True))
+
+ROOT = Path(__file__).resolve().parent.parent
+_default_tmp = tempfile.gettempdir()
+if _free_bytes(_default_tmp) >= 4 * 10**9:
+    DATA_DIR = Path(tempfile.mkdtemp(prefix="pc-gdrive-", dir=_default_tmp))
+else:
+    DATA_DIR = Path(tempfile.mkdtemp(prefix=".pc-gdrive-test-", dir=str(ROOT)))
+_sys_tmp = DATA_DIR / "tmp"
+_sys_tmp.mkdir(parents=True, exist_ok=True)
+os.environ["TEMP"] = os.environ["TMP"] = os.environ["TMPDIR"] = str(_sys_tmp)
+tempfile.tempdir = str(_sys_tmp)
+
+
+def _cleanup_data_dir() -> None:
+    with contextlib.suppress(Exception):
+        db.engine.dispose()
+    for _ in range(15):
+        shutil.rmtree(DATA_DIR, ignore_errors=True)
+        if not DATA_DIR.exists():
+            break
+        time.sleep(0.05)
+
+
+atexit.register(_cleanup_data_dir)
 os.environ.update(
     PEAKCUT_DATA=str(DATA_DIR),
     DATABASE_URL="",
@@ -2010,9 +2033,30 @@ vm.runInNewContext(code, sandbox, {filename: "index_behavior.js"});
               ("</script>" not in combined_js and combined_js.count("{") == combined_js.count("}")),
               True)
 
+    # 21. _atomic_replace retries transient Windows PermissionError (e.g. antivirus/indexer brief file lock)
+    ar_src = DATA_DIR / "atomic_src.tmp"
+    ar_dst = DATA_DIR / "atomic_dst.json"
+    ar_src.write_text('{"ok":true}', encoding="utf-8")
+    ar_calls = {"n": 0}
+    orig_path_replace = Path.replace
+
+    def flaky_replace(self, target):
+        ar_calls["n"] += 1
+        if ar_calls["n"] < 3:
+            raise PermissionError(5, "Access is denied")
+        return orig_path_replace(self, target)
+
+    Path.replace = flaky_replace
+    try:
+        gdrive._atomic_replace(ar_src, ar_dst)
+    finally:
+        Path.replace = orig_path_replace
+    check("_atomic_replace retries transient PermissionError and completes atomic swap",
+          (ar_calls["n"], not ar_src.exists(), ar_dst.read_text(encoding="utf-8")),
+          (3, True, '{"ok":true}'))
+
     print("ALL PASSED" if not fails else f"{len(fails)} failed")
 finally:
-    db.engine.dispose()
-    shutil.rmtree(DATA_DIR, ignore_errors=True)
+    _cleanup_data_dir()
 
 sys.exit(1 if fails else 0)

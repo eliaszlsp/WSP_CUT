@@ -131,6 +131,17 @@ def _cfg() -> dict:
         return _copy_cfg(_mem[u])
 
 
+def _atomic_replace(src: Path, dst: Path) -> None:
+    for attempt in range(6):
+        try:
+            src.replace(dst)
+            return
+        except PermissionError:
+            if attempt == 5:
+                raise
+            time.sleep(0.02 * (attempt + 1))
+
+
 def _save(cfg: dict) -> dict:
     u = ctx.uid()
     clean = _copy_cfg(cfg)
@@ -142,7 +153,7 @@ def _save(cfg: dict) -> dict:
             tmp.chmod(0o600)
         except OSError:
             pass
-        tmp.replace(f)
+        _atomic_replace(tmp, f)
         _mem[u] = _copy_cfg(clean)
         cfg.clear()
         cfg.update(_copy_cfg(clean))
@@ -849,7 +860,7 @@ def ensure_local(job: dict, clip: dict) -> Path | None:
             if not tmp.is_file() or tmp.stat().st_size != wrote:
                 tmp.unlink(missing_ok=True)
                 return None
-            tmp.replace(dest)
+            _atomic_replace(tmp, dest)
             sweep_cache()
             return dest
         except Exception:  # noqa: BLE001

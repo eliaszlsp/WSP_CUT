@@ -18,9 +18,40 @@ PORT = int(os.environ.get("PEAKCUT_TEST_PORT", "8799"))
 BASE = f"http://127.0.0.1:{PORT}"
 
 
+def _free_bytes(path: str | Path) -> int:
+    try:
+        return shutil.disk_usage(path).free
+    except OSError:
+        return 0
+
+
+def _rm_tree(path: Path) -> None:
+    def _on_err(func, p, _exc):
+        try:
+            os.chmod(p, 0o700)
+            func(p)
+        except OSError:
+            pass
+
+    for _ in range(20):
+        if not path.exists():
+            return
+        shutil.rmtree(path, onerror=_on_err)
+        if not path.exists():
+            return
+        time.sleep(0.1)
+
+
 def main() -> int:
-    data = Path(tempfile.mkdtemp(prefix="peakcut-test-"))
-    env = {**os.environ, "PEAKCUT_DATA": str(data), "PEAKCUT_PORT": str(PORT), "PEAKCUT_PUBLIC_URL": BASE,
+    tmp_env = {}
+    if _free_bytes(tempfile.gettempdir()) < 4 * 10**9 and _free_bytes(ROOT) >= 4 * 10**9:
+        data = Path(tempfile.mkdtemp(prefix=".peakcut-test-", dir=str(ROOT)))
+        sys_tmp = data / "sys_tmp"
+        sys_tmp.mkdir(parents=True, exist_ok=True)
+        tmp_env = {"TEMP": str(sys_tmp), "TMP": str(sys_tmp), "TMPDIR": str(sys_tmp)}
+    else:
+        data = Path(tempfile.mkdtemp(prefix="peakcut-test-"))
+    env = {**os.environ, **tmp_env, "PEAKCUT_DATA": str(data), "PEAKCUT_PORT": str(PORT), "PEAKCUT_PUBLIC_URL": BASE,
            "PEAKCUT_HOST": "127.0.0.1", "PEAKCUT_AUTO_RELOAD": "0", "DATABASE_URL": "",
            "PEAKCUT_ACCOUNTS": "1", "PEAKCUT_FETCH_MODEL": "0", "PEAKCUT_UPDATE_CHECK": "0",                   # these tests are about people signing in; tests/test_local.py covers the default
            # nothing outside this machine is contacted: no AI, no email, no Google sign-in
@@ -68,7 +99,8 @@ def main() -> int:
                 ("fresh installs: ffmpeg, the speech model, AI errors", ["tests/test_tools.py"]),
                 ("the storage folder: full drive, open, move", ["tests/test_storage.py"]),
                 ("security: visitor address, email addresses, Google sign-in, prompts", ["tests/test_hardening.py"]),
-                ("long logs, the machine monitor, failed recordings, admin day totals", ["tests/test_robustness.py"])]
+                ("long logs, the machine monitor, failed recordings, admin day totals", ["tests/test_robustness.py"]),
+                ("Google Drive archiving and SSD cleanup", ["tests/test_gdrive.py"])]
         for name, args in runs:
             print(f"\n=== {name} ===", flush=True)
             r = subprocess.run([sys.executable, *args], cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace")
@@ -86,7 +118,11 @@ def main() -> int:
             server.wait(timeout=15)
         except subprocess.TimeoutExpired:
             server.kill()
-        shutil.rmtree(data, ignore_errors=True)
+            try:
+                server.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+        _rm_tree(data)
     print("\nFAILED: " + ", ".join(failed) if failed else "\nAll tests passed.")
     return 1 if failed else 0
 
