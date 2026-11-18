@@ -22,6 +22,15 @@ def _mine() -> list:
 OPEN = ("scheduled", "posting")
 
 
+def has_open_posts(jid: str, cid: str) -> bool:
+    u = ctx.uid()
+    with _lock:
+        return any(
+            p.get("user") == u and p.get("job") == jid and p.get("clip") == cid and p.get("status") in OPEN
+            for p in _posts
+        )
+
+
 def _save():
     with _lock:
         tmp = _FILE.with_suffix(".tmp")
@@ -114,7 +123,13 @@ def _post(p):
             raise RuntimeError("The clip no longer exists or is not finished.")
         if not acc:
             raise RuntimeError("That account was disconnected.")
-        path = Path(job["dir"]) / "clips" / clip["file"]
+        fname = Path(str(clip.get("file") or "")).name
+        path = (Path(job["dir"]) / "clips" / fname) if fname else Path(job["dir"]) / "clips"
+        if not path.is_file() and clip.get("drive"):
+            from . import gdrive
+            path = gdrive.ensure_local(job, clip)
+        if not path or not path.is_file():
+            raise RuntimeError("The clip file is no longer available.")
         creator = creators.get(job["creator"]) or dict(creators.DEFAULTS, name="clips")
         title, cap = clip.get("title") or clip.get("hook") or "Clip", _caption(clip, creator)
         if acc["platform"] == "youtube":
@@ -138,6 +153,12 @@ def _post(p):
             alerts.notify(f"post failed on {p['account_name']} ({p['title']}): {p['error'][:200]}", kind="post")
     _save()
     _mirror(p)
+    if p.get("status") == "posted":
+        with ctx.as_user(p["user"]):
+            still_open = has_open_posts(p["job"], p["clip"])
+        if not still_open:
+            from . import gdrive
+            gdrive.on_clip_posted(p["user"], p["job"], p["clip"])
 
 
 def _run():

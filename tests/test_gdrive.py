@@ -117,6 +117,7 @@ try:
         "bad_content_length": None,
         "on_token_refresh": None,
         "on_folder_create": None,
+        "on_put": None,
         "calls": [],
         "media_delay": 0.0,
     }
@@ -235,6 +236,8 @@ try:
     def fake_put(url, content=None, headers=None, timeout=None):
         with mock_lock:
             state_mock["calls"].append(("PUT", url, None, len(content or b""), headers or {}))
+        if state_mock["on_put"]:
+            state_mock["on_put"]()
         if state_mock["put_fail_text"]:
             return FakeResp(502, text=state_mock["put_fail_text"])
         up = state_mock["uploads"].get(url)
@@ -748,6 +751,439 @@ try:
            not bob_cache.exists()),
           (True, True, True, True, True))
     gdrive._inflight.clear()
+
+    # ---- 9. Task 2: Post-publish Drive archiving queue, multi-account trigger, and SSD cleanup
+    import zipfile
+    from studio import account, creators, jobs, notices, posting, render, storage
+
+    with ctx.as_user(alice.id):
+        # Reconnect Alice's Google Drive cleanly for queue/archive tests
+        state_mock["email"] = "alice-vault@example.com"
+        s_t2 = parse_qs(urlparse(gdrive.connect_url()).query)["state"][0]
+        gdrive.connect_finish("code-t2", s_t2)
+        gdrive.save_settings({"auto_after_post": True, "auto_days": 3})
+
+        cr_arch = creators.create({"name": "ProGamer"})
+        # Register 3 social accounts for Alice (YouTube, TikTok, Instagram) with mocked uploaders
+        accounts._put({"id": "yt_1", "platform": "youtube", "name": "YT Main", "added": time.time(),
+                       "refresh_token": "r", "access_token": "a", "expires": time.time() + 3600})
+        accounts._put({"id": "tt_1", "platform": "tiktok", "name": "TT Main", "added": time.time(),
+                       "refresh_token": "r", "access_token": "a", "expires": time.time() + 3600, "username": "progamer"})
+        accounts._put({"id": "yt_2", "platform": "youtube", "name": "YT Second", "added": time.time(),
+                       "refresh_token": "r", "access_token": "a", "expires": time.time() + 3600})
+
+        uploaded_social = []
+
+        def fake_yt_upload(acc, path, title, desc, tags, privacy):
+            uploaded_social.append((acc["id"], Path(path).read_bytes(), title))
+            return f"vid_{acc['id']}", f"https://youtube.com/shorts/vid_{acc['id']}"
+
+        def fake_tt_upload(acc, path, caption, privacy):
+            uploaded_social.append((acc["id"], Path(path).read_bytes(), caption))
+            return f"tt_{acc['id']}", f"https://tiktok.com/@progamer/video/1"
+
+        orig_yt_upload = accounts.youtube_upload
+        orig_tt_upload = accounts.tiktok_upload
+        accounts.youtube_upload = fake_yt_upload
+        accounts.tiktok_upload = fake_tt_upload
+
+        def make_job_with_clips(clip_specs, creator_id=None, src_type="file", src_url="", created_at=None, status="done"):
+            src = {"type": "url", "url": src_url, "name": "vod.mp4"} if src_type == "url" else {"type": "file", "path": "", "name": "vod.mp4"}
+            j = jobs.create(src, {}, enqueue=False, creator=creator_id)
+            jdir = Path(j["dir"])
+            cdir_j = jdir / "clips"
+            cdir_j.mkdir(parents=True, exist_ok=True)
+            raw_video = jdir / "source.mp4"
+            raw_video.write_bytes(b"RAW_SOURCE_VIDEO_" * 400)
+            j["source_path"] = str(raw_video)
+            if src_type == "file":
+                j["source"]["path"] = str(raw_video)
+            j["width"], j["height"], j["duration"] = 1920, 1080, 120.0
+            if created_at is not None:
+                j["created"] = created_at
+            for sp in clip_specs:
+                cid = sp["id"]
+                mp4_bytes = sp.get("bytes", f"MP4_PAYLOAD_{j['id']}_{cid}".encode("utf-8") * 120)
+                if sp.get("status", "done") == "done":
+                    (cdir_j / f"{cid}.mp4").write_bytes(mp4_bytes)
+                    (cdir_j / f"{cid}.jpg").write_bytes(b"\xff\xd8\xffJPGCOVER")
+                    (cdir_j / f"{cid}.ass").write_text("[Script Info]\nTitle: test\n", encoding="utf-8")
+                    (cdir_j / f"{cid}.json").write_text(json.dumps({"title": sp.get("title", cid)}), encoding="utf-8")
+                src_piece_path = ""
+                if sp.get("with_piece", True) and sp.get("status", "done") == "done":
+                    piece = cdir_j / f"{cid}.src.ts"
+                    piece.write_bytes(b"TS_PIECE_" * 200)
+                    src_piece_path = str(piece)
+                clip_dict = {
+                    "id": cid,
+                    "status": sp.get("status", "done"),
+                    "file": f"{cid}.mp4" if sp.get("status", "done") == "done" else "",
+                    "cover": f"{cid}.jpg" if sp.get("status", "done") == "done" else "",
+                    "title": sp.get("title", f"Epic Moment {cid}"),
+                    "hook": sp.get("hook", "WAIT FOR IT"),
+                    "description": "Nice play",
+                    "hashtags": ["gaming"],
+                    "score": 92,
+                    "start": 10.0,
+                    "end": 25.0,
+                    "version": sp.get("version", 1),
+                    "made_at": sp.get("made_at", time.time()),
+                }
+                if src_piece_path:
+                    clip_dict["src"] = src_piece_path
+                j["clips"].append(clip_dict)
+            j["status"] = status
+            jobs.save(j)
+            return j
+
+        j_multi = make_job_with_clips(
+            [
+                {"id": "clip01", "title": "Clutch: 1v5 Ace!"},
+                {"id": "clip02", "title": "Second Clip"},
+                {"id": "clip03", "status": "error", "title": "Failed Clip"},
+            ],
+            creator_id=cr_arch["id"],
+        )
+        j_multi_dir = Path(j_multi["dir"])
+        c1_mp4 = j_multi_dir / "clips" / "clip01.mp4"
+        c1_src = j_multi_dir / "clips" / "clip01.src.ts"
+        c1_jpg = j_multi_dir / "clips" / "clip01.jpg"
+        c1_ass = j_multi_dir / "clips" / "clip01.ass"
+        c1_json = j_multi_dir / "clips" / "clip01.json"
+        c1_expected_bytes = c1_mp4.read_bytes()
+        src_mp4 = j_multi_dir / "source.mp4"
+
+        pub_before = jobs.public(j_multi)
+        c1_pub_before = next(c for c in pub_before["clips"] if c["id"] == "clip01")
+        check("jobs.public reports local=True and no drive before archive",
+              (c1_pub_before.get("local"), "drive" in c1_pub_before),
+              (True, False))
+
+        # Schedule clip01 on TWO accounts (yt_1 and tt_1)
+        queued_posts = posting.enqueue(j_multi, j_multi["clips"][0], ["yt_1", "tt_1"], now=True)
+        check("has_open_posts is True when scheduled posts exist",
+              (len(queued_posts), posting.has_open_posts(j_multi["id"], "clip01")),
+              (2, True))
+
+        # First post finishes -> second post is still scheduled -> clip MUST stay local!
+        queued_posts[0]["status"] = "posting"
+        posting._post(queued_posts[0])
+        gdrive.drain_queue()
+        check("after 1st of 2 posts, clip stays on local SSD and is not archived yet",
+              (queued_posts[0]["status"], posting.has_open_posts(j_multi["id"], "clip01"),
+               c1_mp4.is_file(), c1_src.is_file(), "drive" not in j_multi["clips"][0]),
+              ("posted", True, True, True, True))
+
+        # Second post finishes -> no open posts left -> clip01 archives to Drive & deletes .mp4 + .src.ts!
+        count_before = gdrive.public_status(include_quota=False)["archived_count"]
+        bytes_before = gdrive.public_status(include_quota=False)["archived_bytes"]
+        storage._used["at"] = time.time()
+        queued_posts[1]["status"] = "posting"
+        posting._post(queued_posts[1])
+        gdrive.drain_queue()
+
+        c1_after = jobs.get(j_multi["id"])["clips"][0]
+        st_after_c1 = gdrive.public_status(include_quota=False)
+        check("after 2nd post finishes, clip01 is archived to Drive with verified byte size",
+              (queued_posts[1]["status"], posting.has_open_posts(j_multi["id"], "clip01"),
+               bool(c1_after.get("drive")), c1_after.get("drive", {}).get("size") == len(c1_expected_bytes)),
+              ("posted", False, True, True))
+        check("archiving unlinks clip01.mp4 and clip01.src.ts while keeping cover .jpg, .ass, and .json",
+              (not c1_mp4.exists(), not c1_src.exists(), "src" not in c1_after,
+               c1_jpg.is_file(), c1_ass.is_file(), c1_json.is_file()),
+              (True, True, True, True, True, True))
+        check("gdrive counters increment and storage._used cache invalidated",
+              (st_after_c1["archived_count"] == count_before + 1,
+               st_after_c1["archived_bytes"] == bytes_before + len(c1_expected_bytes),
+               storage._used["at"] == 0),
+              (True, True, True))
+        log_msgs = [entry["msg"] for entry in creators.read_log(cr_arch["id"], 10)]
+        check("creator log records Google Drive archive event",
+              any("Archived to Google Drive" in m and "Clutch: 1v5 Ace!" in m for m in log_msgs),
+              True)
+
+        # source.mp4 MUST STILL EXIST because clip02 (status=done) is not archived yet!
+        check("source.mp4 stays while clip02 is still unarchived",
+              (src_mp4.is_file(), bool(jobs.get(j_multi["id"])["source_path"])),
+              (True, True))
+
+        # Manual 1-click archive on clip02 -> once clip02 archives (clip03 is status=error), source.mp4 is cleaned!
+        check("request_archive queues clip02", gdrive.request_archive(j_multi["id"], "clip02"), True)
+        check("duplicate enqueue_clip while inflight returns False",
+              gdrive.enqueue_clip(alice.id, j_multi["id"], "clip02", manual=True), False)
+        gdrive.drain_queue()
+        j_multi_reloaded = jobs.get(j_multi["id"])
+        on_disk_job = json.loads((j_multi_dir / "job.json").read_text(encoding="utf-8"))
+        check("once all non-error clips are archived, source.mp4 is unlinked and source paths cleared",
+              (not src_mp4.exists(),
+               j_multi_reloaded["source_path"] == "",
+               j_multi_reloaded["source"].get("path", "") == "",
+               on_disk_job["source_path"] == ""),
+              (True, True, True, True))
+
+        pub_after = jobs.public(j_multi_reloaded)
+        c1_pub_after = next(c for c in pub_after["clips"] if c["id"] == "clip01")
+        check("jobs.public reports local=False and exposes drive metadata after archive",
+              (c1_pub_after.get("local"), c1_pub_after.get("drive", {}).get("id") == c1_after["drive"]["id"]),
+              (False, True))
+
+        # request_archive validation checks
+        try:
+            gdrive.request_archive(j_multi["id"], "clip01")
+            check("request_archive rejects already-archived clip", False)
+        except ValueError as e:
+            check("request_archive rejects already-archived clip", "already archived" in str(e).lower())
+
+        try:
+            gdrive.request_archive(j_multi["id"], "clip03")
+            check("request_archive rejects non-done clip", False)
+        except ValueError as e:
+            check("request_archive rejects non-done clip", "not ready" in str(e).lower())
+
+    # ---- 10. Re-posting an archived clip & account.zip_clips via ensure_local()
+    with ctx.as_user(alice.id):
+        # Evict local drive_cache first so both re-post and zip_clips must stream from Google Drive
+        gdrive._purge_user_cache(alice.id)
+        uploaded_social.clear()
+        p_repost = posting.enqueue(jobs.get(j_multi["id"]), jobs.get(j_multi["id"])["clips"][0], ["yt_2"], now=True)
+        p_repost[0]["status"] = "posting"
+        posting._post(p_repost[0])
+        check("re-posting an archived clip streams from Drive via ensure_local and succeeds",
+              (p_repost[0]["status"], len(uploaded_social), uploaded_social[0][0], uploaded_social[0][1] == c1_expected_bytes),
+              ("posted", 1, "yt_2", True))
+
+        # Evict cache again and verify account.zip_clips downloads archived clips seamlessly
+        gdrive._purge_user_cache(alice.id)
+        zpath = account.zip_clips([(j_multi["id"], "clip01"), (j_multi["id"], "clip02")])
+        with zipfile.ZipFile(zpath, "r") as zf:
+            znames = zf.namelist()
+            zdata = {n: zf.read(n) for n in znames}
+        check("account.zip_clips packages archived clips via ensure_local",
+              (len(znames) == 2, any(v == c1_expected_bytes for v in zdata.values())),
+              (True, True))
+
+    # ---- 11. jobs.request_render guard on archived clips vs URL-source jobs
+    with ctx.as_user(alice.id):
+        try:
+            jobs.request_render(j_multi["id"], "clip01", {"hook": "NEW HOOK"})
+            check("request_render raises friendly ValueError for archived file-upload clip without raw source", False)
+        except ValueError as e:
+            check("request_render raises friendly ValueError for archived file-upload clip without raw source",
+                  "archived to google drive" in str(e).lower() and "cannot be re-made" in str(e).lower())
+
+        j_url = make_job_with_clips(
+            [{"id": "clip01", "title": "URL Clip"}],
+            src_type="url",
+            src_url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        )
+        gdrive.request_archive(j_url["id"], "clip01")
+        gdrive.drain_queue()
+        check("URL-source job source.mp4 also cleaned after archive", not (Path(j_url["dir"]) / "source.mp4").exists(), True)
+
+        orig_q_put = jobs._q.put
+        queued_renders = []
+        jobs._q.put = lambda item, user=None: queued_renders.append((item, user))
+        try:
+            jobs.request_render(j_url["id"], "clip01", {"hook": "REMAKE FROM URL"})
+            check("URL-source job still allows request_render after archive",
+                  (jobs.get(j_url["id"])["clips"][0]["status"], len(queued_renders)),
+                  ("queued", 1))
+        finally:
+            jobs._q.put = orig_q_put
+
+    # ---- 12. Upload failure: SSD files kept, last_error redacted, 3-strike retry backoff & bell notification + FolderGone retry
+    with ctx.as_user(alice.id):
+        j_fail = make_job_with_clips([{"id": "clip01", "title": "Tough Upload"}])
+        jf_mp4 = Path(j_fail["dir"]) / "clips" / "clip01.mp4"
+        jf_src = Path(j_fail["dir"]) / "clips" / "clip01.src.ts"
+        jf_raw = Path(j_fail["dir"]) / "source.mp4"
+
+        state_mock["put_fail_text"] = "502 upstream error Bearer gd-access-1 upload_id=up_secret_fail_1"
+        t_fail0 = time.time()
+        gdrive.request_archive(j_fail["id"], "clip01")
+        gdrive.drain_queue()
+
+        st_fail1 = gdrive.public_status(include_quota=False)
+        r_entry1 = gdrive._retries.get((alice.id, j_fail["id"], "clip01"))
+        check("1st upload failure leaves local .mp4, .src.ts, and source.mp4 untouched on SSD",
+              (jf_mp4.is_file(), jf_src.is_file(), jf_raw.is_file(), "drive" not in jobs.get(j_fail["id"])["clips"][0]),
+              (True, True, True, True))
+        check("1st upload failure saves redacted last_error and schedules retry #1 in ~600s",
+              ("502" in st_fail1["last_error"],
+               "gd-access-1" not in st_fail1["last_error"],
+               "up_secret_fail_1" not in st_fail1["last_error"],
+               r_entry1 is not None and r_entry1[0] == 1 and r_entry1[1] >= t_fail0 + 590),
+              (True, True, True, True))
+
+        # Sweep before due_at does NOT prematurely re-queue
+        sw_early = gdrive.sweep_user(alice.id, now=t_fail0 + 60)
+        check("sweep_user before retry due_at does not re-queue failed clip", sw_early["queued"], 0)
+
+        # Sweep after due_at triggers attempt #2 -> fails -> tries=2
+        sw_due2 = gdrive.sweep_user(alice.id, now=r_entry1[1] + 1)
+        check("sweep_user at due_at re-queues retry #2", sw_due2["queued"], 1)
+        gdrive.drain_queue()
+        r_entry2 = gdrive._retries.get((alice.id, j_fail["id"], "clip01"))
+        check("2nd upload failure increments retry count to 2",
+              r_entry2 is not None and r_entry2[0] == 2, True)
+
+        # Sweep after 2nd due_at triggers attempt #3 -> fails -> pops _retries & records bell notification!
+        notices_before = len(notices.mine()["items"])
+        sw_due3 = gdrive.sweep_user(alice.id, now=r_entry2[1] + 1)
+        gdrive.drain_queue()
+        notices_after = notices.mine()["items"]
+        check("3rd upload failure clears _retries, keeps local files, and sends Storage failure notification",
+              (sw_due3["queued"] == 1,
+               (alice.id, j_fail["id"], "clip01") not in gdrive._retries,
+               jf_mp4.is_file(),
+               len(notices_after) == notices_before + 1,
+               notices_after[0]["kind"] == "post",
+               notices_after[0]["link"] == "/app/settings/storage",
+               "Tough Upload" in notices_after[0]["title"]),
+              (True, True, True, True, True, True, True))
+        state_mock["put_fail_text"] = None
+
+        # FolderGone during archive_one upload_mp4: drops folder cache, recreates folder, and succeeds cleanly!
+        cfg_fg = gdrive._cfg()
+        fld_cached = gdrive.folder_for(cfg_fg, "", ts=jobs.get(j_fail["id"])["clips"][0]["made_at"])
+        state_mock["folders"].pop(fld_cached, None)  # delete cached month folder right before archive_one
+        res_fg = gdrive.archive_one(alice.id, j_fail["id"], "clip01", manual=True)
+        check("archive_one recovers from FolderGone, clears last_error, and archives clip",
+              (res_fg, bool(jobs.get(j_fail["id"])["clips"][0].get("drive")),
+               gdrive.public_status(include_quota=False)["last_error"], not jf_mp4.exists()),
+              ("archived", True, "", True))
+
+    # ---- 13. Version guard: mid-upload re-render skips unlinking new local file; render_one clears stale drive info
+    with ctx.as_user(alice.id):
+        j_ver = make_job_with_clips([{"id": "clip01", "title": "Remake Race", "version": 1},
+                                     {"id": "clip02", "title": "Keep Source Alive", "version": 1}])
+        jv_mp4 = Path(j_ver["dir"]) / "clips" / "clip01.mp4"
+        new_v2_bytes = b"BRAND_NEW_V2_RENDER_BYTES" * 100
+
+        def simulate_concurrent_rerender():
+            state_mock["on_put"] = None
+            with jobs._lock:
+                c_live = jobs.get(j_ver["id"])["clips"][0]
+                jv_mp4.write_bytes(new_v2_bytes)
+                c_live["version"] = 2
+                jobs.save(jobs.get(j_ver["id"]))
+
+        state_mock["on_put"] = simulate_concurrent_rerender
+        ver_status = gdrive.archive_one(alice.id, j_ver["id"], "clip01", manual=True)
+        state_mock["on_put"] = None
+        c_ver_after = jobs.get(j_ver["id"])["clips"][0]
+        check("version guard skips archiving and preserves new v2 local .mp4 when clip re-rendered mid-upload",
+              (ver_status, "drive" not in c_ver_after, jv_mp4.is_file(), jv_mp4.read_bytes() == new_v2_bytes),
+              ("skipped", True, True, True))
+
+        # Now archive clip01 (v2) while clip02 keeps source.mp4 alive, then run render_one -> version becomes 3 & drive popped!
+        check("archiving v2 succeeds cleanly", gdrive.archive_one(alice.id, j_ver["id"], "clip01", manual=True), "archived")
+        check("v2 has drive metadata before re-render", bool(jobs.get(j_ver["id"])["clips"][0].get("drive")), True)
+
+        orig_render_clip = render.render_clip
+
+        def fake_render_clip(src, out_dir, cid, clip_d, near, w, h):
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / f"{cid}.mp4").write_bytes(b"V3_RENDERED_LOCAL")
+            (out_dir / f"{cid}.jpg").write_bytes(b"\xff\xd8\xffJPG")
+            return {"file": f"{cid}.mp4", "cover": f"{cid}.jpg"}
+
+        render.render_clip = fake_render_clip
+        try:
+            c_to_rerender = jobs.get(j_ver["id"])["clips"][0]
+            c_to_rerender["captions"] = False
+            jobs.render_one(jobs.get(j_ver["id"]), c_to_rerender, [])
+        finally:
+            render.render_clip = orig_render_clip
+        check("render_one (version > 1) pops stale drive dict so new local render is authoritative",
+              (c_to_rerender["version"], "drive" not in c_to_rerender, (Path(j_ver["dir"]) / "clips" / "clip01.mp4").is_file()),
+              (3, True, True))
+
+    # ---- 14. sweep_user: auto_days age threshold, force=True, open scheduled post protection, 0-clip source cleanup & path safety
+    with ctx.as_user(alice.id):
+        now_sw = time.time()
+        gdrive.save_settings({"auto_after_post": True, "auto_days": 3})
+
+        # Clean up clip02 from j_ver first so j_ver doesn't affect counts
+        gdrive.archive_one(alice.id, j_ver["id"], "clip01", manual=True)
+        gdrive.archive_one(alice.id, j_ver["id"], "clip02", manual=True)
+
+        j_old_unposted = make_job_with_clips(
+            [{"id": "clip01", "title": "Old Unposted", "made_at": now_sw - 4 * 86400}],
+            created_at=now_sw - 4 * 86400,
+        )
+        j_young_unposted = make_job_with_clips(
+            [{"id": "clip01", "title": "Young Unposted", "made_at": now_sw - 1 * 86400}],
+            created_at=now_sw - 1 * 86400,
+        )
+        j_old_scheduled = make_job_with_clips(
+            [{"id": "clip01", "title": "Old But Scheduled", "made_at": now_sw - 5 * 86400}],
+            created_at=now_sw - 5 * 86400,
+        )
+        posting.enqueue(j_old_scheduled, j_old_scheduled["clips"][0], ["yt_1"], now=False)
+
+        j_zero_old = make_job_with_clips([], created_at=now_sw - 4 * 86400)
+        j_zero_young = make_job_with_clips([], created_at=now_sw - 1 * 86400)
+
+        # Path-safety test: an external file outside job["dir"] referenced in source_path must NEVER be unlinked!
+        outside_file = DATA_DIR / "never_touch_external.mp4"
+        outside_file.write_bytes(b"PRECIOUS_EXTERNAL_FILE")
+        j_ext = make_job_with_clips([], created_at=now_sw - 5 * 86400)
+        Path(j_ext["source_path"]).unlink(missing_ok=True)
+        j_ext["source_path"] = str(outside_file)
+        j_ext["source"]["path"] = str(outside_file)
+        jobs.save(j_ext)
+
+        sw1 = gdrive.sweep_user(alice.id, now=now_sw, force=False)
+        gdrive.drain_queue()
+        check("sweep_user archives old unposted clip and cleans old 0-clip job source",
+              (sw1["queued"], sw1["cleaned"],
+               bool(jobs.get(j_old_unposted["id"])["clips"][0].get("drive")),
+               not (Path(j_zero_old["dir"]) / "source.mp4").exists()),
+              (1, 1, True, True))
+        check("sweep_user skips young unposted clip, skips clip with open scheduled post, and keeps young 0-clip source",
+              ("drive" not in jobs.get(j_young_unposted["id"])["clips"][0],
+               (Path(j_young_unposted["dir"]) / "clips" / "clip01.mp4").is_file(),
+               "drive" not in jobs.get(j_old_scheduled["id"])["clips"][0],
+               (Path(j_old_scheduled["dir"]) / "clips" / "clip01.mp4").is_file(),
+               (Path(j_zero_young["dir"]) / "source.mp4").is_file()),
+              (True, True, True, True, True))
+        check("clean_job_source never unlinks files outside job['dir']",
+              (outside_file.is_file(), jobs.get(j_ext["id"])["source_path"] == ""),
+              (True, True))
+
+        # force=True archives young unposted clip, while STILL skipping clip with open scheduled post!
+        sw_force = gdrive.sweep_user(alice.id, now=now_sw, force=True)
+        gdrive.drain_queue()
+        check("sweep_user(force=True) archives young unposted clip while still skipping open scheduled post",
+              (sw_force["queued"],
+               bool(jobs.get(j_young_unposted["id"])["clips"][0].get("drive")),
+               "drive" not in jobs.get(j_old_scheduled["id"])["clips"][0],
+               (Path(j_old_scheduled["dir"]) / "clips" / "clip01.mp4").is_file()),
+              (1, True, True, True))
+
+        accounts.youtube_upload = orig_yt_upload
+        accounts.tiktok_upload = orig_tt_upload
+
+    # ---- 15. account.delete_account(uid) calls gdrive.forget(uid) including _retries
+    del_user, _ = auth._create("delme@example.com", "delme", password_hash="x")
+    with ctx.as_user(del_user.id):
+        _ = gdrive._cfg()
+        _ = gdrive.connect_url()
+    gdrive._inflight.add((del_user.id, "jd", "cd"))
+    gdrive._retries[(del_user.id, "jd", "cd")] = (1, time.time() + 600, False)
+    del_cache = config.TMP_DIR / "drive_cache" / f"{del_user.id}_cached.mp4"
+    del_cache.parent.mkdir(parents=True, exist_ok=True)
+    del_cache.write_bytes(b"cached-video")
+    del_res = account.delete_account(del_user.id)
+    check("account.delete_account calls gdrive.forget(uid) clearing _mem, _states, _inflight, _retries and drive_cache",
+          (del_res.get("ok"),
+           del_user.id not in gdrive._mem,
+           all(v[0] != del_user.id for v in gdrive._states.values()),
+           (del_user.id, "jd", "cd") not in gdrive._inflight,
+           (del_user.id, "jd", "cd") not in gdrive._retries,
+           not del_cache.exists()),
+          (True, True, True, True, True, True))
 
     print("ALL PASSED" if not fails else f"{len(fails)} failed")
 finally:

@@ -7,6 +7,7 @@ into a short-lived local cache whenever someone plays, downloads or re-posts the
 import json
 import math
 import os
+import queue
 import re
 import secrets
 import threading
@@ -41,6 +42,11 @@ _lock = threading.RLock()
 _mem: dict = {}
 _states: dict = {}          # state -> (uid, created_at)
 _inflight: set = set()      # (uid, jid, cid) items queued or uploading
+_queue: "queue.Queue" = queue.Queue()
+_retries: dict = {}         # (uid, jid, cid) -> (tries, due_at, manual)
+_attempts: dict = {}        # (uid, jid, cid) -> consecutive failed attempts
+_exhausted: set = set()     # (uid, jid, cid) items that failed 3 times until retried manually or reconnected
+_started = False
 _cache_guard = threading.Lock()
 _cache_locks: dict = {}     # "{uid}_{did}" -> Lock
 
@@ -181,6 +187,12 @@ def forget(uid: str):
             _states.pop(k, None)
         for item in [it for it in list(_inflight) if it[0] == uid]:
             _inflight.discard(item)
+        for k in [k for k in list(_retries) if k[0] == uid]:
+            _retries.pop(k, None)
+        for k in [k for k in list(_attempts) if k[0] == uid]:
+            _attempts.pop(k, None)
+        for k in [k for k in list(_exhausted) if k[0] == uid]:
+            _exhausted.discard(k)
     _purge_user_cache(uid)
 
 
@@ -325,6 +337,8 @@ def connect_finish(code: str, state: str) -> dict:
             "last_error": "",
         }
         _save(cfg)
+        for k in [k for k in list(_exhausted) if k[0] == ctx.uid()]:
+            _exhausted.discard(k)
     if not same_email:
         _purge_user_cache(ctx.uid())
     ctx.bump()
@@ -347,6 +361,12 @@ def disconnect() -> dict:
             last_error="",
         )
         _save(cfg)
+        for k in [k for k in list(_retries) if k[0] == u]:
+            _retries.pop(k, None)
+        for k in [k for k in list(_attempts) if k[0] == u]:
+            _attempts.pop(k, None)
+        for k in [k for k in list(_exhausted) if k[0] == u]:
+            _exhausted.discard(k)
     _purge_user_cache(u)
     ctx.bump()
     return public_status(include_quota=False)
@@ -819,3 +839,394 @@ def ensure_local(job: dict, clip: dict) -> Path | None:
             return None
         finally:
             tmp.unlink(missing_ok=True)
+
+
+# ------------------------------------------------------------------ Archive queue, retries, SSD cleanup & sweep
+def enqueue_clip(uid: str, jid: str, cid: str, manual: bool = False) -> bool:
+    if not (isinstance(uid, str) and uid and isinstance(jid, str) and jid and isinstance(cid, str) and cid):
+        return False
+    key = (uid, jid, cid)
+    with _lock:
+        if key in _inflight:
+            return False
+        _inflight.add(key)
+        prev = _retries.pop(key, None)
+        if prev is not None:
+            _attempts[key] = prev[0]
+        if manual:
+            _exhausted.discard(key)
+        _queue.put((uid, jid, cid, bool(manual)))
+    ctx.bump(uid)
+    return True
+
+
+def on_clip_posted(uid: str, jid: str, cid: str) -> bool:
+    if not uid:
+        return False
+    with ctx.as_user(uid):
+        cfg = _cfg()
+        if cfg["connected"] and cfg["refresh_token"] and cfg["auto_after_post"]:
+            return enqueue_clip(uid, jid, cid, manual=False)
+    return False
+
+
+def request_archive(jid: str, cid: str) -> bool:
+    from . import jobs
+    uid = ctx.uid()
+    if not is_connected():
+        raise ValueError("Connect Google Drive in Settings, Storage first.")
+    job = jobs.get(jid)
+    clip = next((c for c in (job or {}).get("clips", []) if c.get("id") == cid), None)
+    if not job or not clip or clip.get("status") != "done":
+        raise ValueError("That clip is not ready to archive.")
+    if clip.get("drive"):
+        raise ValueError("This clip is already archived on Google Drive.")
+    fname = Path(str(clip.get("file") or "")).name
+    if not fname or not (Path(job["dir"]) / "clips" / fname).is_file():
+        raise ValueError("That clip is not ready to archive.")
+    key = (uid, jid, cid)
+    with _lock:
+        if key not in _inflight:
+            _retries.pop(key, None)
+            _attempts.pop(key, None)
+            _exhausted.discard(key)
+    return enqueue_clip(uid, jid, cid, manual=True)
+
+
+def clean_job_source(job: dict, now: float = None, auto_days: int = 0) -> bool:
+    from . import jobs, storage
+    if not isinstance(job, dict) or not job.get("dir"):
+        return False
+    live_job = jobs._jobs.get(job.get("id")) if job.get("id") else None
+    target = live_job if isinstance(live_job, dict) else job
+    if target.get("status") != "done":
+        return False
+    clips = target.get("clips") or []
+    if any(c.get("status") in ("queued", "rendering") for c in clips):
+        return False
+
+    t_now = time.time() if now is None else float(now)
+    valid = [c for c in clips if c.get("status") != "error"]
+    eligible = (
+        (bool(valid) and all(c.get("status") == "done" and c.get("drive") for c in valid))
+        or (not valid and auto_days > 0 and (t_now - float(target.get("created") or 0)) >= auto_days * 86400)
+    )
+    if not eligible:
+        return False
+
+    sp1 = target.get("source_path") or ""
+    src_obj = target.get("source") if isinstance(target.get("source"), dict) else None
+    sp2 = (src_obj.get("path") if src_obj else "") or ""
+    if not sp1 and not sp2:
+        return False
+
+    jdir_res = Path(target["dir"]).resolve()
+    freed = False
+    seen = set()
+    for raw_p in (sp1, sp2):
+        if not raw_p:
+            continue
+        s = str(raw_p)
+        if s in seen:
+            continue
+        seen.add(s)
+        p = Path(s)
+        try:
+            inside = p.resolve().parent == jdir_res
+        except OSError:
+            inside = False
+        if inside and p.is_file() and p.name not in ("job.json", "words.json"):
+            try:
+                sz = p.stat().st_size
+                p.unlink()
+                if sz > 0:
+                    freed = True
+            except OSError:
+                pass
+
+    with jobs._lock:
+        changed = False
+        if target.get("source_path"):
+            target["source_path"] = ""
+            changed = True
+        if isinstance(target.get("source"), dict) and target["source"].get("path"):
+            target["source"]["path"] = ""
+            changed = True
+        if job is not target:
+            job["source_path"] = target.get("source_path", "")
+            if isinstance(job.get("source"), dict):
+                job["source"]["path"] = (target.get("source") or {}).get("path", "")
+        if changed or freed:
+            jobs.save(target)
+            storage._used["at"] = 0
+    return freed
+
+
+def archive_one(uid: str, jid: str, cid: str, manual: bool = False) -> str:
+    from . import alerts, creators, jobs, posting, storage
+    key = (uid, jid, cid)
+    try:
+        with _key_lock(f"arch:{uid}:{jid}:{cid}"), ctx.as_user(uid):
+            cfg = _cfg()
+            job = jobs.get(jid)
+            clip = next((c for c in (job or {}).get("clips", []) if c.get("id") == cid), None)
+            if (
+                not (cfg["connected"] and cfg["refresh_token"])
+                or not job
+                or not clip
+                or clip.get("status") != "done"
+                or clip.get("drive")
+            ):
+                if not clip or clip.get("drive"):
+                    with _lock:
+                        _retries.pop(key, None)
+                        _attempts.pop(key, None)
+                return "skipped"
+
+            if not manual and posting.has_open_posts(jid, cid):
+                return "skipped"
+
+            fname = Path(str(clip.get("file") or "")).name
+            if not clip.get("file") or not fname or not job.get("dir"):
+                return "skipped"
+            local = Path(job["dir"]) / "clips" / fname
+            if not local.is_file():
+                return "skipped"
+
+            ver_before = clip.get("version", 0)
+            c_obj = creators.get(job.get("creator")) if job.get("creator") else None
+            creator_name = (c_obj.get("name") if c_obj else "") or ""
+            ts = clip.get("made_at") or job.get("created") or time.time()
+            raw_label = str(clip.get("title") or clip.get("hook") or cid)
+            clean_label = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', "-", raw_label).strip(" ._")[:80] or cid
+            remote_name = f"{clean_label}_{jid[:15]}_{cid}.mp4"
+
+            try:
+                fid = folder_for(cfg, creator_name, ts=ts)
+                try:
+                    info = upload_mp4(cfg, local, fid, remote_name)
+                except FolderGone:
+                    drop_folder_cache(cfg)
+                    fid = folder_for(cfg, creator_name, ts=ts)
+                    info = upload_mp4(cfg, local, fid, remote_name)
+            except Exception as e:  # noqa: BLE001
+                err = _redact(str(e), cfg)[:260]
+                notify_exhausted = False
+                with _lock:
+                    live = _cfg()
+                    if live.get("connected") and live.get("refresh_token"):
+                        live["last_error"] = err
+                        _save(live)
+                    prev_tries = _retries.get(key, (_attempts.get(key, 0),))[0]
+                    tries = prev_tries + 1
+                    if tries < 3:
+                        _attempts[key] = tries
+                        _retries[key] = (tries, time.time() + 600, bool(manual))
+                    else:
+                        _retries.pop(key, None)
+                        _attempts.pop(key, None)
+                        _exhausted.add(key)
+                        notify_exhausted = True
+                if notify_exhausted:
+                    alerts.notify(
+                        f"Google Drive archive failed ({clip.get('title') or cid}): {err[:160]}",
+                        kind="post",
+                        link="/app/settings/storage",
+                    )
+                ctx.bump(uid)
+                return "failed"
+
+            with jobs._lock:
+                if (
+                    jobs.get(jid) is not job
+                    or clip not in job.get("clips", [])
+                    or clip.get("status") != "done"
+                    or clip.get("version", 0) != ver_before
+                ):
+                    return "skipped"
+                clip["drive"] = info
+                jobs.save(job)
+
+            try:
+                local.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+            jdir = Path(job["dir"])
+            src_raw = clip.get("src")
+            if src_raw:
+                p = Path(str(src_raw))
+                try:
+                    mine = (
+                        p.resolve().parent in ((jdir / "clips").resolve(), jdir.resolve())
+                        and p.name.startswith(f"{cid}.src")
+                    )
+                except OSError:
+                    mine = False
+                if mine:
+                    try:
+                        p.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    with jobs._lock:
+                        if clip in job.get("clips", []):
+                            clip.pop("src", None)
+                            jobs.save(job)
+
+            clips_dir = jdir / "clips"
+            if clips_dir.is_dir():
+                for extra in list(clips_dir.glob(f"{cid}.src*")):
+                    if extra.is_file():
+                        try:
+                            extra.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+
+            with _lock:
+                _retries.pop(key, None)
+                _attempts.pop(key, None)
+                _exhausted.discard(key)
+                live = _cfg()
+                live["archived_count"] = _nonneg_int(live.get("archived_count")) + 1
+                live["archived_bytes"] = _nonneg_int(live.get("archived_bytes")) + _nonneg_int(info.get("size"))
+                live["last_error"] = ""
+                _save(live)
+
+            creators.log(job.get("creator"), f"Archived to Google Drive: {clip.get('title') or clip.get('hook') or cid}")
+            clean_job_source(job)
+            storage._used["at"] = 0
+            ctx.bump(uid)
+            return "archived"
+    finally:
+        removed = False
+        with _lock:
+            if key in _inflight:
+                _inflight.discard(key)
+                removed = True
+        if removed:
+            ctx.bump(uid)
+
+
+def sweep_user(uid: str, now: float = None, force: bool = False) -> dict:
+    from . import jobs, posting
+    if not uid:
+        return {"queued": 0, "cleaned": 0}
+    with ctx.as_user(uid):
+        cfg = _cfg()
+        if not (cfg["connected"] and cfg["refresh_token"]):
+            return {"queued": 0, "cleaned": 0}
+        now_ts = float(now) if now is not None else time.time()
+        days = int(cfg["auto_days"])
+        queued = 0
+        cleaned = 0
+
+        with _lock:
+            due_retries = [
+                (jid, cid, manual)
+                for (r_uid, jid, cid), (_tries, due_at, manual) in list(_retries.items())
+                if r_uid == uid and due_at <= now_ts
+            ]
+        for jid, cid, manual in due_retries:
+            if enqueue_clip(uid, jid, cid, manual=manual):
+                queued += 1
+
+        for j in jobs.list_jobs():
+            jid = j.get("id") or ""
+            jdir = Path(j["dir"]) if j.get("dir") else None
+            for c in j.get("clips", []):
+                cid = c.get("id") or ""
+                if not cid or c.get("status") != "done" or c.get("drive"):
+                    continue
+                if not force:
+                    with _lock:
+                        if (uid, jid, cid) in _retries or (uid, jid, cid) in _exhausted:
+                            continue
+                else:
+                    with _lock:
+                        if (uid, jid, cid) not in _inflight:
+                            _retries.pop((uid, jid, cid), None)
+                            _attempts.pop((uid, jid, cid), None)
+                            _exhausted.discard((uid, jid, cid))
+                fname = Path(str(c.get("file") or "")).name
+                if not jdir or not fname or not (jdir / "clips" / fname).is_file():
+                    continue
+                if posting.has_open_posts(jid, cid):
+                    continue
+                posts_map = c.get("posts") if isinstance(c.get("posts"), dict) else {}
+                was_posted = any(isinstance(p, dict) and p.get("status") == "posted" for p in posts_map.values())
+                age_ok = days > 0 and (now_ts - float(c.get("made_at") or j.get("created") or now_ts)) >= days * 86400
+                if force or (cfg["auto_after_post"] and was_posted) or age_ok:
+                    if enqueue_clip(uid, jid, cid, manual=force):
+                        queued += 1
+            if clean_job_source(j, now=now_ts, auto_days=days):
+                cleaned += 1
+
+        return {"queued": queued, "cleaned": cleaned}
+
+
+def sweep_all(now: float = None) -> dict:
+    from . import auth
+    sweep_cache()
+    total_q = 0
+    total_c = 0
+    for uid in auth.user_ids():
+        try:
+            res = sweep_user(uid, now=now, force=False)
+            total_q += res.get("queued", 0)
+            total_c += res.get("cleaned", 0)
+        except Exception:  # noqa: BLE001
+            pass
+    return {"queued": total_q, "cleaned": total_c}
+
+
+def drain_queue(timeout: float = 10.0) -> bool:
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    while True:
+        try:
+            item = _queue.get_nowait()
+        except queue.Empty:
+            if _queue.unfinished_tasks == 0:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.01)
+            continue
+        try:
+            uid, jid, cid, manual = item
+            archive_one(uid, jid, cid, manual=manual)
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            _queue.task_done()
+
+
+def _worker_loop():
+    while True:
+        item = _queue.get()
+        try:
+            uid, jid, cid, manual = item
+            archive_one(uid, jid, cid, manual=manual)
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            _queue.task_done()
+
+
+def _sweep_loop():
+    time.sleep(15)
+    while True:
+        try:
+            sweep_all()
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(60)
+
+
+def start():
+    global _started
+    with _lock:
+        if _started:
+            return
+        _started = True
+    threading.Thread(target=_worker_loop, name="gdrive-worker", daemon=True).start()
+    threading.Thread(target=_sweep_loop, name="gdrive-sweep", daemon=True).start()

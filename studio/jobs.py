@@ -155,7 +155,19 @@ def public(job) -> dict:
     """What the browser may see: no server paths, no owner id."""
     out = {k: v for k, v in job.items() if k not in HIDDEN}
     out["source"] = {k: v for k, v in job["source"].items() if k != "path"}
-    out["clips"] = [{k: v for k, v in c.items() if k not in ("src", "fixed_words", "fixed_for")} for c in job["clips"]]
+    jdir = Path(job["dir"]) if job.get("dir") else None
+    out["clips"] = [
+        {
+            **{k: v for k, v in c.items() if k not in ("src", "fixed_words", "fixed_for")},
+            "local": bool(
+                jdir
+                and c.get("file")
+                and Path(str(c["file"])).name
+                and (jdir / "clips" / Path(str(c["file"])).name).is_file()
+            ),
+        }
+        for c in job["clips"]
+    ]
     ai = job.get("ai") or {}
     out["ai"] = {"tokens": ai.get("tokens", 0), "note": ai.get("note", ""), "used": bool(ai.get("model"))}   # never the model, never raw errors
     if job.get("status") == "queued":
@@ -371,6 +383,18 @@ def request_render(jid, cid, changes: dict):
         new["style"] = DEFAULTS["style"]
     if new.get("layout") not in render.LAYOUTS:
         new["layout"] = DEFAULTS["layout"]
+    has_clip_src = bool(clip.get("src") and Path(clip["src"]).is_file())
+    has_job_src = bool(job.get("source_path") and Path(job["source_path"]).is_file())
+    has_url_src = (job.get("source") or {}).get("type") == "url" and bool((job.get("source") or {}).get("url"))
+    was_cleaned = bool(
+        clip.get("drive")
+        or any(c.get("drive") for c in job.get("clips", []))
+        or (not job.get("source_path") and not (job.get("source") or {}).get("path"))
+    )
+    if was_cleaned and not (has_clip_src or has_job_src or has_url_src):
+        raise ValueError(
+            "This clip was archived to Google Drive and its raw video was removed to save disk space, so it cannot be re-made."
+        )
     clip.update(new, status="queued")
     save(job)
     _q.put(("clip", jid, cid))
@@ -391,6 +415,8 @@ def render_one(job, clip, words):
         near = _caption_words(job, clip, words, off) if clip.get("captions", True) else []
         out = render.render_clip(src, d / "clips", clip["id"], local, near, job["width"], job["height"])
         clip.update(out, status="done", version=clip.get("version", 0) + 1, error=None)
+        if clip["version"] > 1:
+            clip.pop("drive", None)
         post = {k: clip[k] for k in ("title", "description", "hashtags", "hook", "start", "end", "score")}
         (d / "clips" / f"{clip['id']}.json").write_text(json.dumps(post, indent=1), encoding="utf-8")
         if clip["version"] == 1:

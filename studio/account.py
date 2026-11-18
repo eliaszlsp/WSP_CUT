@@ -82,9 +82,13 @@ def zip_clips(clip_ids: list, limit_gb: float = 4.0) -> Path:
     for jid, cid in dict.fromkeys(clip_ids):
         job = jobs.get(jid)
         clip = next((c for c in (job or {}).get("clips", []) if c["id"] == cid and c.get("status") == "done"), None)
-        if not clip or not clip.get("file"):
+        if not clip or (not clip.get("file") and not clip.get("drive")):
             continue
-        f = Path(job["dir"]) / "clips" / Path(str(clip["file"])).name
+        fname = Path(str(clip.get("file") or "")).name
+        f = (Path(job["dir"]) / "clips" / fname) if fname else Path(job["dir"]) / "clips"
+        if not f.is_file() and clip.get("drive"):
+            from . import gdrive
+            f = gdrive.ensure_local(job, clip) or f
         if not f.is_file():
             continue
         total += f.stat().st_size
@@ -160,8 +164,9 @@ def delete_account(uid: str) -> dict:
         accounts._settings_mem.pop(uid, None)
     except Exception:  # noqa: BLE001
         pass
-    from . import posting
+    from . import gdrive, posting
     posting.forget(uid)                            # scheduled posts must not outlive the account that owns them
+    gdrive.forget(uid)
     usage.forget(uid)
     shutil.rmtree(config.user_dir(uid), ignore_errors=True)
     return {"ok": True}
