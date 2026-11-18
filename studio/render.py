@@ -3,6 +3,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import unicodedata
 from pathlib import Path
 
 from . import config, roman
@@ -93,7 +94,8 @@ def _clean(text):
 
 
 def _key(word):
-    return re.sub(r"[^a-z0-9']", "", word.lower())
+    folded = "".join(ch for ch in unicodedata.normalize("NFD", str(word or "")) if not unicodedata.combining(ch))
+    return re.sub(r"[^a-z0-9']", "", folded.lower())
 
 
 def _groups(words, per):

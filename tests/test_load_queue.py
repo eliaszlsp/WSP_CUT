@@ -1,32 +1,11 @@
 """The line under load: holds while the server is near full, moves the moment it is not. Usage: test_load_queue.py <root>"""
+import multiprocessing
 import os
+import shutil
 import sys
 import tempfile
 import threading
 import time
-
-os.environ["PEAKCUT_DATA"] = tempfile.mkdtemp()
-sys.path.insert(0, sys.argv[1])
-from studio import config, jobs, load  # noqa: E402
-
-load.MIN_FREE_RAM_GB = 0.0  # this checks the processor; how much memory the test machine has free is not the point
-config.JOB_WORKERS = 8      # the ceiling on videos at once; the test is about load, not about how many cores this machine has
-
-fails = []
-
-
-def check(name, ok, extra=""):
-    print(("PASS " if ok else "FAIL ") + name + (f"   {extra}" if extra else ""))
-    if not ok:
-        fails.append(name)
-
-
-# ---- the monitor measures something real
-load.start()
-time.sleep(2.5)
-idle = load.state()
-check("monitor reads the processor", 0 <= idle["cpu"] <= 100, str(idle))
-check("monitor reads free memory and disk", idle["ram_free_gb"] > 0.1 and idle["disk_free_gb"] > 0.1)
 
 
 def burn(until):
@@ -34,9 +13,29 @@ def burn(until):
         sum(i * i for i in range(20000))
 
 
-import multiprocessing  # noqa: E402
-
 if __name__ == "__main__":
+    tmp_data = tempfile.mkdtemp(prefix="pc-load-")
+    os.environ["PEAKCUT_DATA"] = tmp_data
+    sys.path.insert(0, sys.argv[1])
+    from studio import config, jobs, load  # noqa: E402
+
+    load.MIN_FREE_RAM_GB = 0.0  # this checks the processor; how much memory the test machine has free is not the point
+    config.JOB_WORKERS = 8      # the ceiling on videos at once; the test is about load, not about how many cores this machine has
+
+    fails = []
+
+    def check(name, ok, extra=""):
+        print(("PASS " if ok else "FAIL ") + name + (f"   {extra}" if extra else ""))
+        if not ok:
+            fails.append(name)
+
+    # ---- the monitor measures something real
+    load.start()
+    time.sleep(2.5)
+    idle = load.state()
+    check("monitor reads the processor", 0 <= idle["cpu"] <= 100, str(idle))
+    check("monitor reads free memory and disk", idle["ram_free_gb"] > 0.1 and idle["disk_free_gb"] > 0.1)
+
     stop = time.time() + 22
     ps = [multiprocessing.Process(target=burn, args=(stop,)) for _ in range(os.cpu_count() or 4)]
     [p.start() for p in ps]
@@ -77,4 +76,6 @@ if __name__ == "__main__":
     release.set()
     time.sleep(1.5)
     check("line is empty and nothing is held", q.running == 0 and not q.turn)
+    shutil.rmtree(tmp_data, ignore_errors=True)
     print("\n%d failed" % len(fails) if fails else "\nALL PASSED")
+    sys.exit(1 if fails else 0)

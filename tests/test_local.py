@@ -175,6 +175,9 @@ check("dashboard includes connection status panel and per-service test buttons",
 check("dashboard includes live test progress bar, spinner and step counter",
       all(tok in app_html2 for tok in ("ai-prog", "btn-spin", "Testing model")),
       True)
+check("dashboard keeps AI test errors visible with persistent alert, merge preservation and quick-fix actions",
+      all(tok in app_html2 for tok in ('id="ai_alert"', "aiMergeChecks", 'data-act="aifix"', "ai-chk-fix")),
+      True)
 
 print("ALL PASSED" if not fails else f"{len(fails)} failed")
 import shutil  # noqa: E402
