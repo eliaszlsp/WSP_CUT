@@ -187,12 +187,21 @@ def ask_ai(prompt, schema=None, purpose="AI call", timeout=None):
     if not ts:
         raise RuntimeError("The AI is not set up on this server.")
     prim = ai.provider()
+    deadline = (time.monotonic() + timeout) if timeout else None
     last, last_prov, last_model = None, None, None
     for i, (prov, model) in enumerate(ts):
-        tries = 2 if len(ts) > 1 and i < len(ts) - 1 else 3
+        left = len(ts) - i
+        tries = 2 if len(ts) > 1 and left > 1 else 3
         for attempt in range(tries):
+            if deadline is not None:
+                rem = deadline - time.monotonic()
+                if rem <= 0:
+                    break
+                call_to = max(2.0, rem / min(left, 3)) if left > 1 else rem
+            else:
+                call_to = None
             try:
-                out, sent, wrote = ai.call(model, prompt, schema or SCHEMA, timeout, provider_id=prov)
+                out, sent, wrote = ai.call(model, prompt, schema or SCHEMA, call_to, provider_id=prov)
                 usage.record(sent, wrote, purpose)
                 ai.clear_problem()
                 used = model if prov == prim else f"{prov}:{model}"
@@ -200,7 +209,10 @@ def ask_ai(prompt, schema=None, purpose="AI call", timeout=None):
             except Exception as e:  # noqa: BLE001
                 last, last_prov, last_model = e, prov, model
                 if ("HTTP 429" in str(e) or "HTTP 5" in str(e)) and attempt + 1 < tries:
-                    time.sleep(min(4 * (attempt + 1), 6) if timeout else 4 * (attempt + 1))
+                    wait = min(4 * (attempt + 1), 6) if timeout else 4 * (attempt + 1)
+                    if deadline is not None and (deadline - time.monotonic()) <= wait + 3.0:
+                        break
+                    time.sleep(wait)
                     continue
                 break
     ai.note_problem(last, provider_id=last_prov, model=last_model)

@@ -1251,8 +1251,12 @@ def ai_usage():
 
 # ---------------------------------------------------------------- the AI key and model, set from the dashboard
 # Only the owner (or an admin, when accounts are on) reaches these. The key is never sent back to the page.
-def _ai_error(e) -> str:
-    return ai.redact(safe.friendly(e, 300))
+def _ai_error(e, extra_key: str = "") -> str:
+    raw = ai.redact(e)
+    ek = str(extra_key or "").strip()
+    if ek:
+        raw = raw.replace(ek, "<key>")
+    return safe.friendly(raw, 300)
 
 
 @app.get("/api/ai")
@@ -1292,9 +1296,9 @@ def ai_models(request: Request, body: dict = Body(default={})):
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:  # noqa: BLE001
-        reason = ai.explain(e)
+        reason = ai.explain(e, provider_id=body.get("provider"))
         raise HTTPException(502, f"The service did not give its list of models. {reason}" if reason else
-                            "The service did not give its list of models. Check the key, or type the model yourself. " + _ai_error(e)[:160])
+                            "The service did not give its list of models. Check the key, or type the model yourself. " + _ai_error(e, body.get("key") or "")[:160])
 
 
 @app.post("/api/ai/test")

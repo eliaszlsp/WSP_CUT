@@ -221,6 +221,86 @@ with ctx.as_user(u1.id):
           "OpenRouter" in ai.problem["text"] and "or-secret-key-9999" not in ai.problem["text"]
           and "gem-secret-key-1111" not in ai.problem["text"], ai.problem["text"])
 
+# ---- review fixes: boundary redaction, timeout budget, key-hint threshold, .env migration, see() model fallback
+# 1) Key straddling the 300-char slice boundary must be redacted before slicing
+long_err = ("x" * 292) + "or-secret-key-9999" + ("y" * 40)
+ai.httpx.post = lambda url, json=None, headers=None, timeout=None, **_k: Reply(400, long_err)  # noqa: A002
+try:
+    ai.call("openrouter/free", "hi", brain.SCHEMA, provider_id="openrouter")
+    boundary_msg = ""
+except Exception as e_b:  # noqa: BLE001
+    boundary_msg = str(e_b)
+check("redact runs before slicing so boundary keys never leak",
+      "or-secret" not in boundary_msg and "9999" not in boundary_msg and "<key>" in boundary_msg, boundary_msg)
+
+# 2) Live timeout budget is shared across targets instead of multiplied per target
+ai.save("gemini", "g-1, g-2", "", "gem-secret-key-1111",
+        fallback_provider="openrouter", fallback_models="openrouter/free", fallback_key="or-secret-key-9999")
+timeouts_seen = []
+
+
+def fake_timeout_cascade(url, json=None, headers=None, timeout=None, **_k):  # noqa: A002
+    timeouts_seen.append((url, timeout))
+    if "generativelanguage" in url:
+        raise ai.httpx.ReadTimeout("timed out")
+    return Reply(200, {"choices": [{"message": {"content": globals()["json_text"]({"items": [CLIP]})}}],
+                       "usage": {"prompt_tokens": 10, "completion_tokens": 5}})
+
+
+ai.httpx.post = fake_timeout_cascade
+with ctx.as_user(u1.id):
+    out_to, mod_to, _tok_to = brain.ask_ai("hi", brain.SCHEMA, "Live timeout test", timeout=12.0)
+    check("timeout budget is split so hung primary leaves room for fallback",
+          out_to == [CLIP] and "openrouter/free" in mod_to and all(t is not None and t < 10.0 for _, t in timeouts_seen[:2]),
+          str(timeouts_seen))
+
+# 3) Key hint requires >= 12 chars uniformly, and tiny < 8-char keys are rejected
+pub_short = ai.save("gemini", "g-1", "", "short12345", fallback_provider="openrouter", fallback_models="m", fallback_key="short67890")
+check("keys under 12 chars hide key_hint everywhere",
+      pub_short["key_hint"] == "" and pub_short["fallback"]["key_hint"] == ""
+      and pub_short["saved_profiles"]["gemini"]["key_hint"] == "" and pub_short["saved_profiles"]["openrouter"]["key_hint"] == "",
+      str(pub_short))
+check("tiny keys under 8 chars are refused",
+      _raises(ValueError, lambda: ai.save("gemini", "g-1", "", "abc")))
+
+# 4) see() tries second model on same provider when first returns 429
+ai.save("gemini", "g-rate-limited, g-vision-ok", "", "gem-secret-key-11111111", fallback_provider="")
+ai.httpx.post = lambda url, json=None, headers=None, timeout=None, **_k: (  # noqa: A002
+    Reply(429, {"error": {"message": "rate limit"}}) if "g-rate-limited" in url else
+    Reply(200, {"candidates": [{"content": {"parts": [{"text": "NO CAM"}]}}], "usageMetadata": {"promptTokenCount": 8, "totalTokenCount": 10}})
+)
+pic2, _, _ = ai.see("cam?", b"\xff\xd8\xff\xd9", timeout=10.0)
+check("see() falls back to second model on same provider after 429", pic2 == "NO CAM", pic2)
+
+# 5) .env-backed settings migrate into fallback without retyping key, and fallback-only .env works in test()/brief()
+(config.DATA_DIR / "ai.json").unlink(missing_ok=True)
+ai._saved["at"] = None
+config.AI_PROVIDER, config.AI_MODELS = "openrouter", ["openrouter/free"]
+os.environ["PEAKCUT_AI_KEY"] = "env-openrouter-key-7777"
+config._kept.clear()
+pub_env = ai.save("gemini", "g-1", "", "gem-secret-key-11111111", fallback_provider="openrouter")
+check(".env primary migrates to fallback without retyping key or model",
+      pub_env["fallback"]["ready"] and pub_env["fallback"]["models"] == ["openrouter/free"] and pub_env["fallback"]["key_hint"] == "7777",
+      str(pub_env))
+
+(config.DATA_DIR / "ai.json").unlink(missing_ok=True)
+ai._saved["at"] = None
+config.AI_PROVIDER, config.AI_MODELS = "gemini", []
+os.environ["PEAKCUT_AI_KEY"] = ""
+config.AI_FALLBACK_PROVIDER, config.AI_FALLBACK_MODELS = "openrouter", ["openrouter/free"]
+os.environ["PEAKCUT_AI_FALLBACK_KEY"] = "env-fb-secret-key-8888"
+config._kept.clear()
+ai.httpx.post = lambda url, json=None, headers=None, timeout=None, **_k: (  # noqa: A002
+    Reply(200, {"choices": [{"message": {"content": '{"items":["ok"]}'}}], "usage": {"prompt_tokens": 5, "completion_tokens": 2}})
+)
+with ctx.as_user(u1.id):
+    usage.forget_all()
+    br = usage.brief()
+    tst_fb_only = ai.test()
+    check("fallback-only .env works cleanly in usage.brief() and ai.test()",
+          br["ready"] and br["provider"] == "OpenRouter" and tst_fb_only["ok"] and tst_fb_only["model"] == "openrouter/free",
+          str((br, tst_fb_only)))
+
 print("ALL PASSED" if not fails else f"{len(fails)} failed")
 import shutil  # noqa: E402
 db.engine.dispose()

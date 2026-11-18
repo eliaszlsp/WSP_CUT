@@ -66,9 +66,15 @@ def _from_dashboard() -> dict:
 
 
 def _profiles(d: dict | None = None) -> dict:
-    """Saved per-service settings (models, base_url, key), migrated seamlessly from single-service ai.json files."""
+    """Saved per-service settings (models, base_url, key), migrated seamlessly from .env and single-service ai.json files."""
     d = _from_dashboard() if d is None else d
     out = {}
+    for env_p, env_ms, env_b, env_k in (
+        (_norm(config.AI_FALLBACK_PROVIDER), list(config.AI_FALLBACK_MODELS), config.AI_FALLBACK_BASE_URL, config.ai_fallback_key()),
+        (_norm(config.AI_PROVIDER), list(config.AI_MODELS), config.AI_BASE_URL, config.ai_key()),
+    ):
+        if env_p in PROVIDERS and (env_ms or env_b or env_k):
+            out[env_p] = {"models": env_ms, "base_url": env_b, "key": env_k}
     raw = d.get("profiles")
     if isinstance(raw, dict):
         for pid, v in raw.items():
@@ -80,9 +86,9 @@ def _profiles(d: dict | None = None) -> dict:
     fb = d.get("fallback")
     if isinstance(fb, dict) and _norm(fb.get("provider")) in PROVIDERS:
         fp = _norm(fb.get("provider"))
-        out.setdefault(fp, {"models": [str(m).strip() for m in (fb.get("models") or []) if str(m).strip()],
-                            "base_url": str(fb.get("base_url") or "").rstrip("/"),
-                            "key": str(fb.get("key") or "")})
+        out[fp] = {"models": [str(m).strip() for m in (fb.get("models") or []) if str(m).strip()],
+                   "base_url": str(fb.get("base_url") or "").rstrip("/"),
+                   "key": str(fb.get("key") or "")}
     lp = _norm(d.get("provider"))
     if lp in PROVIDERS:
         out[lp] = {"models": [str(m).strip() for m in (d.get("models") or []) if str(m).strip()],
@@ -194,7 +200,7 @@ def ready() -> bool:
 
 
 def _hint(k: str) -> str:
-    return k[-4:] if len(k) >= 8 else ""
+    return k[-4:] if len(k) >= 12 else ""
 
 
 def public() -> dict:
@@ -202,10 +208,10 @@ def public() -> dict:
     its last four characters so the owner can tell which key it is."""
     c, fb, profs = current(), fallback(), _profiles()
     saved_public = {pid: {"models": v["models"], "base_url": v["base_url"],
-                          "has_key": bool(v["key"]), "key_hint": _hint(v["key"]) if len(v["key"]) >= 12 else (v["key"][-4:] if len(v["key"]) >= 8 else "")}
+                          "has_key": bool(v["key"]), "key_hint": _hint(v["key"])}
                     for pid, v in profs.items()}
     return {"provider": c["provider"], "models": c["models"], "base_url": c["base_url"], "has_key": bool(c["key"]),
-            "key_hint": c["key"][-4:] if len(c["key"]) >= 12 else "", "ready": ready(), "label": label(),
+            "key_hint": _hint(c["key"]), "ready": ready(), "label": label(),
             "saved_here": bool(_from_dashboard().get("provider")),
             "fallback": {"provider": fb["provider"], "models": fb["models"], "base_url": fb["base_url"],
                          "has_key": bool(fb["key"]), "key_hint": _hint(fb["key"]), "ready": fb["ready"], "label": fb["label"]},
@@ -250,11 +256,19 @@ def save(provider_id: str, model_ids, address: str = "", new_key=None,
     k = saved_p_key if new_key is None else str(new_key or "").strip()[:400]
     if not k and p not in NO_KEY:
         raise ValueError("Paste the key for this service.")
+    if k and len(k) < 8:
+        raise ValueError("That key looks too short. Paste the full key from the service.")
     profs[p] = {"models": ms, "base_url": address, "key": k}
 
+    write_fb = True
     if fallback_provider is None:
-        cur_fb = raw.get("fallback") if isinstance(raw.get("fallback"), dict) else {}
-        fb_data = dict(cur_fb) if cur_fb and _norm(cur_fb.get("provider")) != p else {}
+        if "fallback" in raw:
+            cur_fb = raw.get("fallback") if isinstance(raw.get("fallback"), dict) else {}
+            fb_data = dict(cur_fb) if cur_fb and _norm(cur_fb.get("provider")) != p else {}
+        elif _norm(config.AI_FALLBACK_PROVIDER) == p:
+            fb_data = {}
+        else:
+            write_fb, fb_data = False, {}
     else:
         fp = _norm(fallback_provider)
         if fp in ("", "none"):
@@ -267,22 +281,28 @@ def save(provider_id: str, model_ids, address: str = "", new_key=None,
             saved_fb = profs.get(fp, {})
             raw_fms = fallback_models
             if raw_fms is None or (isinstance(raw_fms, str) and not raw_fms.strip()) or raw_fms == []:
-                raw_fms = saved_fb.get("models") or (config.AI_FALLBACK_MODELS if fp == _norm(config.AI_FALLBACK_PROVIDER) else [])
+                raw_fms = saved_fb.get("models") or (old["models"] if old["provider"] == fp else []) or (
+                    config.AI_FALLBACK_MODELS if fp == _norm(config.AI_FALLBACK_PROVIDER) else [])
             fms = _clean_models(raw_fms, "Enter the model to use for the fallback service.")
             raw_faddr = saved_fb.get("base_url", "") if fallback_address is None else fallback_address
             faddr = _clean_address(fp, raw_faddr, "A fallback")
-            saved_fb_key = saved_fb.get("key", "") or (config.ai_fallback_key() if fp == _norm(config.AI_FALLBACK_PROVIDER) else "")
+            saved_fb_key = saved_fb.get("key", "") or (old["key"] if old["provider"] == fp else "") or (
+                config.ai_fallback_key() if fp == _norm(config.AI_FALLBACK_PROVIDER) else "")
             fk = saved_fb_key if fallback_key is None else str(fallback_key or "").strip()[:400]
             if not fk and fp not in NO_KEY:
                 raise ValueError("Paste the key for the fallback service.")
+            if fk and len(fk) < 8:
+                raise ValueError("That fallback key looks too short. Paste the full key from the service.")
             fb_data = {"provider": fp, "models": fms, "base_url": faddr, "key": fk}
             profs[fp] = {"models": fms, "base_url": faddr, "key": fk}
 
+    payload = {"provider": p, "models": ms, "base_url": address, "key": k, "profiles": profs}
+    if write_fb:
+        payload["fallback"] = fb_data
     with _lock:
         f = _file()
         tmp = f.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"provider": p, "models": ms, "base_url": address, "key": k,
-                                   "fallback": fb_data, "profiles": profs}), encoding="utf-8")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
         try:
             os.chmod(tmp, 0o600)        # the key is only for whoever runs the server
         except OSError:
@@ -311,7 +331,7 @@ def list_models(provider_id=None, address=None, with_key=None) -> list:
     else:
         r = httpx.get(f"{base}/models", headers={"Authorization": f"Bearer {k}"} if k else {}, timeout=20)
     if r.status_code != 200:
-        bad = redact(r.text[:200]).replace(k or chr(0), "<key>")
+        bad = redact(r.text).replace(k or chr(0), "<key>")[:200]
         raise AIError(f"HTTP {r.status_code} {bad}", provider_id=p)
     data = r.json()
     if how == "gemini":
@@ -325,13 +345,15 @@ def list_models(provider_id=None, address=None, with_key=None) -> list:
 def test() -> dict:
     """One tiny request with the settings in use, to prove the key, the address and the model all work."""
     c, fb = current(), fallback()
-    if not _slot_ready(c):
+    c_ready = _slot_ready(c)
+    if not c_ready and not fb["ready"]:
         raise ValueError("Save a service, a model and a key first.")
     schema = {"type": "ARRAY", "items": {"type": "STRING"}}
     prompt = 'Answer with a JSON array that holds the single string "ok".'
-    out, sent, wrote = call(c["models"][0], prompt, schema, provider_id=c["provider"])
+    active = c if c_ready else fb
+    out, sent, wrote = call(active["models"][0], prompt, schema, provider_id=active["provider"])
     fb_ok, fb_model, fb_err = None, "", ""
-    if fb["ready"]:
+    if c_ready and fb["ready"]:
         fb_model = fb["models"][0]
         try:
             call(fb_model, prompt, schema, provider_id=fb["provider"])
@@ -339,7 +361,7 @@ def test() -> dict:
         except Exception as e:  # noqa: BLE001
             fb_ok = False
             fb_err = explain(e, fb["provider"], fb_model) or redact(str(e))[:160]
-    return {"ok": True, "model": c["models"][0], "tokens": sent + wrote, "answer": str(out)[:80],
+    return {"ok": True, "model": active["models"][0], "tokens": sent + wrote, "answer": str(out)[:80],
             "fallback_ok": fb_ok, "fallback_model": fb_model, "fallback_error": fb_err}
 
 
@@ -382,7 +404,7 @@ def clear_problem():
 
 
 def _fail(r, model, provider_id: str | None = None):
-    text = redact(r.text[:300])
+    text = redact(r.text)[:300]
     raise AIError(f"HTTP {r.status_code} {text}", provider_id=provider_id, model=model)
 
 
@@ -516,19 +538,31 @@ def see(prompt: str, image: bytes, timeout: float | None = None) -> tuple[str, i
     Nothing is broken by a service that cannot look at pictures, or a model that is only text: the answer
     comes back empty, or says something the caller does not understand, and the caller carries on without
     it. The picture is a JPEG, passed as base64 inside the ordinary message."""
+    import time
     ts = targets()
     if not ts or not image:
         return "", 0, 0
     b64 = base64.b64encode(image).decode()
-    seen_provs, last = set(), None
-    for pid, model in ts:
-        if pid in seen_provs:
+    deadline = (time.monotonic() + timeout) if timeout else None
+    bad_provs, last = set(), None
+    for i, (pid, model) in enumerate(ts):
+        if pid in bad_provs:
             continue
-        seen_provs.add(pid)
+        if deadline is not None:
+            rem = deadline - time.monotonic()
+            if rem <= 0:
+                break
+            left = len(ts) - i
+            call_to = max(2.0, rem / min(left, 3)) if left > 1 else rem
+        else:
+            call_to = None
         try:
-            return _see_one(_cfg_for(pid), model, prompt, b64, timeout)
+            return _see_one(_cfg_for(pid), model, prompt, b64, call_to)
         except Exception as e:  # noqa: BLE001
             last = e
+            s = str(e).lower()
+            if "http 401" in s or "http 403" in s or "connect" in s or "refused" in s or "nameresolution" in s:
+                bad_provs.add(pid)
     raise last
 
 

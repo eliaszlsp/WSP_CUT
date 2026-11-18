@@ -140,6 +140,21 @@ check("the dashboard includes fallback AI controls",
       all(tok in app_html for tok in ('id="ai_fb_provider"', 'id="ai_fb_model"', 'id="ai_fb_key"', 'id="ai_fb_base"', 'data-target="fb"')),
       True)
 
+
+def fake_get_err(url, params=None, headers=None, timeout=None):
+    if "11434" in url:
+        raise ai.httpx.ConnectError("Connection refused")
+    raise RuntimeError("bad header unsaved-typed-key-99998888")
+
+
+ai.httpx.get = fake_get_err
+r_ol = post("/api/ai/models", {"provider": "ollama"})
+check("Find models on fallback names the requested service on connection failure",
+      (r_ol.status_code, "Ollama" in r_ol.text and "Gemini" not in r_ol.text), (502, True))
+r_unsaved = post("/api/ai/models", {"provider": "openai", "key": "unsaved-typed-key-99998888"})
+check("unsaved key typed into Find models is redacted on transport error",
+      (r_unsaved.status_code, "unsaved-typed-key-99998888" in r_unsaved.text), (502, False))
+
 print("ALL PASSED" if not fails else f"{len(fails)} failed")
 import shutil  # noqa: E402
 db.engine.dispose()
