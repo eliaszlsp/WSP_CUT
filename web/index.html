@@ -875,6 +875,7 @@ dialog[open]{animation:fadein .16s ease}
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const safeHttps = u => /^https:\/\/\S+$/i.test(String(u || "").trim()) ? String(u).trim() : "";
 const I = {
  "github": "<path fill-rule=\"evenodd\" transform=\"scale(16)\" d=\"M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z\"/>",
  "instagram": "<rect x=\"32\" y=\"32\" width=\"192\" height=\"192\" rx=\"56\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"18\"/><circle cx=\"128\" cy=\"128\" r=\"42\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"18\"/><circle cx=\"184\" cy=\"72\" r=\"13\"/>",
@@ -1723,7 +1724,9 @@ async function makeClips() {
 /* ============================================================ clips + jobs */
 function scoreCls(s) { return s >= 80 ? "s-hi" : s >= 60 ? "s-mid" : ""; }
 function postPills(c) {
-  const drv = c.drive?.url ? `<a class="pill ok" href="${esc(c.drive.url)}" target="_blank" rel="noopener" title="Saved on Google Drive">${ic("cloud")}Drive</a>` : "";
+  const drv = safeHttps(c.drive?.url)
+    ? `<a class="pill ok" href="${esc(safeHttps(c.drive.url))}" target="_blank" rel="noopener" title="Saved on Google Drive">${ic("cloud")}Drive</a>`
+    : c.drive ? `<span class="pill ok" title="Saved on Google Drive">${ic("cloud")}Drive</span>` : "";
   return drv + Object.values(c.posts || {}).filter(p => p.status !== "cancelled").map(p => {
     const cls = p.status === "posted" ? "ok" : p.status === "failed" ? "bad" : "warn";
     const txt = `${esc(p.account_name)} · ${p.status === "scheduled" ? clock(p.due_at) : p.status}`;
@@ -1731,27 +1734,27 @@ function postPills(c) {
   }).join("");
 }
 function clipHtml(j, c) {
-  const m = `/media/${j.id}/`, a = `data-j="${j.id}" data-c="${esc(c.id)}"`;
+  const m = `/media/${encodeURIComponent(j.id)}/`, a = `data-j="${esc(j.id)}" data-c="${esc(c.id)}"`;
   const body = c.status === "done" ? `<img src="${m}${esc(c.cover)}?v=${c.version}" alt="" loading="lazy"><span class="veil"><span>${ic("play")}</span></span>`
     : c.status === "error" ? `<span class="making" style="animation:none;color:var(--bad);background:var(--bad-soft)">Could not make this clip. Open it to try again.</span>`
     : `<span class="making">${c.status === "rendering" ? "Making this clip…" : "Waiting its turn…"}</span>`;
   const key = `c:${j.id}:${c.id}`, busyClip = c.status === "queued" || c.status === "rendering";
   const pills = postPills(c), canArch = c.status === "done" && !c.drive && S.status?.gdrive?.connected;
   return `<article class="clip ${sel().has(key) ? "picked" : ""}">
-    <button class="shot" data-act="openclip" ${a} aria-label="Open clip: ${esc(c.title || c.hook)}">${body}
+    <button class="shot" type="button" data-act="openclip" ${a} aria-label="Open clip: ${esc(c.title || c.hook)}">${body}
       <span class="badge l ${scoreCls(c.score)}" title="AI score">${c.score || "Hand"}</span><span class="badge r">${fmt(c.end - c.start)}</span></button>
     <div class="clip-body">
       <div class="hook">${esc(c.hook || "Untitled clip")}</div>
       <div class="ttl">${esc(c.title)}</div>
       ${pills ? `<div class="row" style="gap:4px">${pills}</div>` : ""}
       <div class="clip-foot">
-        ${busyClip ? "" : `<label class="selck" title="Select this clip"><input type="checkbox" data-sel="${key}" ${sel().has(key) ? "checked" : ""} aria-label="Select this clip"></label>`}
+        ${busyClip ? "" : `<label class="selck" title="Select this clip"><input type="checkbox" data-sel="${esc(key)}" ${sel().has(key) ? "checked" : ""} aria-label="Select this clip"></label>`}
         ${c.status === "done" ? `<a class="btn sm icon ghost" href="${m}${esc(c.file)}?download=1" title="Download" aria-label="Download">${ic("down")}</a>` : ""}
-        ${canArch ? `<button class="btn sm icon ghost" data-act="gdclip" ${a} title="Archive to Google Drive" aria-label="Archive to Google Drive">${ic("cloud")}</button>` : ""}
-        <button class="btn sm icon ghost" data-act="copy" ${a} title="Copy post text" aria-label="Copy post text">${ic("copy")}</button>
-        ${busyClip ? "" : `<button class="btn sm icon ghost" data-act="delclip" ${a} title="Delete this clip" aria-label="Delete this clip">${ic("trash")}</button>`}
+        ${canArch ? `<button class="btn sm icon ghost" type="button" data-act="gdclip" ${a} title="Archive to Google Drive" aria-label="Archive to Google Drive">${ic("cloud")}</button>` : ""}
+        <button class="btn sm icon ghost" type="button" data-act="copy" ${a} title="Copy post text" aria-label="Copy post text">${ic("copy")}</button>
+        ${busyClip ? "" : `<button class="btn sm icon ghost" type="button" data-act="delclip" ${a} title="Delete this clip" aria-label="Delete this clip">${ic("trash")}</button>`}
         <span class="grow"></span>
-        ${c.status === "done" ? `<button class="btn sm" data-act="openclip" ${a}>${ic("send")}Post</button>` : ""}
+        ${c.status === "done" ? `<button class="btn sm" type="button" data-act="openclip" ${a}>${ic("send")}Post</button>` : ""}
       </div>
     </div></article>`;
 }
@@ -2290,7 +2293,7 @@ async function drawSettings() {
           : gd.connected
             ? `<button class="btn sm" type="button" data-act="gddisconnect">Disconnect</button>`
             : `<a class="btn sm primary" href="/oauth/gdrive/start">${ic("plus")}Connect Google Drive</a>`)
-        + (gd.ready && admin ? `<button class="btn sm ghost" type="button" data-act="gdappsetup" title="Change this server's Google app">${ic("cog")}</button>` : "");
+        + (gd.ready && admin ? `<button class="btn sm ghost" type="button" data-act="gdappsetup" title="Change this server's Google app" aria-label="Change this server's Google app">${ic("cog")}</button>` : "");
       const gdSetup = admin && S.gdSetupOpen ? `<div class="appsetup">
           <p class="sub">PeakCut shares one Google Cloud app for Google Drive archiving and YouTube uploads. Register this server once at <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener">Google Cloud</a>:</p>
           <ol>
@@ -2387,16 +2390,18 @@ function openClip(jid, cid) { D.jid = jid; D.cid = cid; D.sig = ""; drawClipDlg(
 function drawClipDlg(full) {
   const j = jobOf(D.jid), c = j?.clips.find(x => x.id === D.cid), dlg = $("#clipdlg");
   if (!c) { if (dlg.open) dlg.close(); return; }
-  const m = `/media/${j.id}/`, sig = c.status + c.version;
-  const rawGone = !!(c.drive && c.local === false && (j.kind === "live" || j.source?.type !== "url"));
+  const m = `/media/${encodeURIComponent(j.id)}/`, sig = c.status + c.version;
+  const validClips = (j.clips || []).filter(x => x.status !== "error");
+  const allArchived = j.status === "done" && validClips.length > 0 && validClips.every(x => x.drive);
+  const rawGone = !!(c.drive && (j.kind === "live" || (j.source?.type !== "url" && allArchived)));
   const canArch = c.status === "done" && !c.drive && S.status?.gdrive?.connected;
-  const archNote = c.drive?.url ? `<p class="sub">${rawGone
+  const archNote = c.drive ? `<p class="sub">${rawGone
     ? "Archived on Google Drive. Its raw source video was removed to free disk space, so it cannot be re-made — playing, downloading and posting still work."
     : "Archived on Google Drive. Playing, downloading and posting still work."}</p>` : "";
   const footHtml = (c.status === "done" ? `<a class="btn" href="${m}${esc(c.file)}?download=1">${ic("down")}Download</a>` : "")
-    + (canArch ? `<button class="btn" data-act="gdclip" data-j="${j.id}" data-c="${esc(c.id)}">${ic("cloud")}Archive to Drive</button>` : "")
-    + (c.drive?.url ? `<a class="btn" href="${esc(c.drive.url)}" target="_blank" rel="noopener">${ic("upright")}Open in Drive</a>` : "")
-    + `<button class="btn" data-act="copy" data-j="${j.id}" data-c="${esc(c.id)}">${ic("copy")}Copy post text</button>`;
+    + (canArch ? `<button class="btn" type="button" data-act="gdclip" data-j="${esc(j.id)}" data-c="${esc(c.id)}">${ic("cloud")}Archive to Drive</button>` : "")
+    + (safeHttps(c.drive?.url) ? `<a class="btn" href="${esc(safeHttps(c.drive.url))}" target="_blank" rel="noopener">${ic("upright")}Open in Drive</a>` : "")
+    + `<button class="btn" type="button" data-act="copy" data-j="${esc(j.id)}" data-c="${esc(c.id)}">${ic("copy")}Copy post text</button>`;
   const stage = c.status === "done" ? `<video src="${m}${esc(c.file)}?v=${c.version}" poster="${m}${esc(c.cover)}?v=${c.version}" controls autoplay playsinline></video>`
     : c.status === "error" ? `<div class="err" style="padding:20px;text-align:center">${esc(c.error || "Could not make this clip.")}</div>`
     : `<span class="making">${c.status === "rendering" ? "Making this clip…" : "Waiting its turn…"}</span>`;
@@ -2404,7 +2409,7 @@ function drawClipDlg(full) {
     dlg.innerHTML = `<div class="editor"><div class="stage" id="stage">${stage}</div>
       <div class="panel">
         <div class="job-head" style="margin:0"><div><span class="badge ${scoreCls(c.score)}" style="position:static">${c.judges ? "Words " + c.judges.words + (c.judges.reaction ? " · Reaction " + c.judges.reaction : "") : c.score ? "Score " + c.score : "Clipped by hand"}</span>
-          <p class="sub" style="margin-top:8px">${esc(c.reason || "")}</p></div><button class="btn icon ghost" data-act="closedlg" aria-label="Close">${ic("x")}</button></div>
+          <p class="sub" style="margin-top:8px">${esc(c.reason || "")}</p></div><button class="btn icon ghost" type="button" data-act="closedlg" aria-label="Close">${ic("x")}</button></div>
         <h3>On the video</h3>
         <label class="f">Big text<input data-f="hook" value="${esc(c.hook)}"></label>
         <label class="sw"><input type="checkbox" data-f="captions" data-caption-toggle ${c.captions === false ? "" : "checked"}>Generate captions</label>
@@ -2416,12 +2421,12 @@ function drawClipDlg(full) {
         <h3>Post text</h3>
         <label class="f">Title<input data-f="title" value="${esc(c.title)}"></label>
         <label class="f">Description<textarea data-f="description" rows="2">${esc(c.description)}</textarea></label>
-        <button class="btn" data-act="remake" ${rawGone ? "disabled" : ""}>${ic("scissors")}Save and re-make clip</button>
+        <button class="btn" type="button" data-act="remake" ${rawGone ? "disabled" : ""}>${ic("scissors")}Save and re-make clip</button>
         <div id="darchnote"></div>
         <h3>Post it</h3>
         <div id="dposts" class="row" style="gap:4px"></div>
         ${S.accounts.length ? `<div class="row">${S.accounts.map(a => `<label class="ck"><input type="checkbox" data-pacc value="${esc(a.id)}">${esc(a.label)} · ${esc(a.name)}</label>`).join("")}</div>
-          <div class="row"><button class="btn primary" data-act="postnow">${ic("send")}Post now</button><button class="btn" data-act="postqueue">Add to queue</button></div>`
+          <div class="row"><button class="btn primary" type="button" data-act="postnow">${ic("send")}Post now</button><button class="btn" type="button" data-act="postqueue">Add to queue</button></div>`
           : `<p class="help">No accounts connected yet. Connect one in Settings.</p>`}
         <div id="dfoot" class="row" style="margin-top:auto;padding-top:8px;border-top:1px solid var(--line)"></div>
       </div></div>`;
@@ -2478,7 +2483,8 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener("focus", () => { if (!document.hidden) tick(); });
 function loop() {
-  const active = S.jobs.some(j => ["queued", "running", "live"].includes(j.status) || j.clips.some(c => c.status === "queued" || c.status === "rendering"));
+  const active = S.jobs.some(j => ["queued", "running", "live"].includes(j.status) || j.clips.some(c => c.status === "queued" || c.status === "rendering"))
+    || S.status?.gdrive?.queued > 0;
   // quick while something is being made, relaxed otherwise, and slow when the tab is in the background
   const waiting = S.creators.some(c => (c.channels && Object.keys(c.channels).length && !c.profile?.pic) || c.live_job && !jobOf(c.live_job));
   setTimeout(async () => { await tick(); loop(); }, document.hidden ? 20000 : waiting ? 1000 : active ? 2000 : 4000);
@@ -2888,8 +2894,11 @@ document.addEventListener("click", async e => {
     }
     if (a === "gddisconnect") {
       if (!await ask("Disconnect Google Drive?", "Clips already on Google Drive stay there, and new clips will stay on this computer until you connect again.", "Disconnect", true)) return;
-      await api("/api/gdrive", {method: "DELETE"});
-      S.status = await api("/api/status"); render(); toast("Google Drive disconnected", "ok"); return drawSettings();
+      b.disabled = true;
+      try {
+        await api("/api/gdrive", {method: "DELETE"});
+        S.status = await api("/api/status"); render(); toast("Google Drive disconnected", "ok"); return drawSettings();
+      } finally { b.disabled = false; }
     }
     if (a === "gdsweep") {
       b.disabled = true;
@@ -2907,8 +2916,8 @@ document.addEventListener("click", async e => {
     if (a === "gdclip") {
       b.disabled = true;
       try {
-        await send(`/api/jobs/${encodeURIComponent(d.j)}/clips/${encodeURIComponent(d.c)}/archive`);
-        toast("Archiving clip to Google Drive…", "ok");
+        const r = await send(`/api/jobs/${encodeURIComponent(d.j)}/clips/${encodeURIComponent(d.c)}/archive`);
+        toast(r.queued === false ? "Already archiving to Google Drive…" : "Archiving clip to Google Drive…", "ok");
         setTimeout(() => { if (b.isConnected) b.disabled = false; }, 2000);
         return tick();
       } catch (err) { b.disabled = false; throw err; }

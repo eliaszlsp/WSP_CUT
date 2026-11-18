@@ -1784,12 +1784,227 @@ try:
     combined_js = "\n;\n".join(inline_scripts)
     js_tmp = DATA_DIR / "index_inline_check.js"
     js_tmp.write_text(combined_js, encoding="utf-8")
+
+    gdclip_btns = re.findall(r"<button\b[^>]*data-act=[\"']gdclip[\"'][^>]*>", app_html)
+    gdsetup_all_btns = re.findall(r"<button\b[^>]*data-act=[\"']gdappsetup[\"'][^>]*>", app_html)
+    gdsetup_cog_btns = re.findall(
+        r"<button\b[^>]*class=[\"']btn sm ghost[\"'][^>]*data-act=[\"']gdappsetup[\"'][^>]*>",
+        app_html,
+    )
+    dlg_m = re.search(r"function drawClipDlg\(full\)\s*\{.*?\n\}", app_html, re.S)
+    dlg_src = dlg_m.group(0) if dlg_m else ""
+    clip_m = re.search(r"function clipHtml\(j,\s*c\)\s*\{.*?\n\}", app_html, re.S)
+    clip_src = clip_m.group(0) if clip_m else ""
+    dlg_btns = re.findall(r"<button\b[^>]*data-act=[\"'](?:remake|copy|gdclip)[\"'][^>]*>", dlg_src)
+
+    check("icon-only gdclip and gdappsetup buttons have aria-label and type='button', and modal buttons have type='button'",
+          (len(gdclip_btns) == 2,
+           all('type="button"' in b for b in gdclip_btns + gdsetup_all_btns),
+           any('aria-label="Archive to Google Drive"' in b for b in gdclip_btns),
+           len(gdsetup_cog_btns) == 1 and 'aria-label="Change this server\'s Google app"' in gdsetup_cog_btns[0],
+           len(dlg_btns) >= 3 and all('type="button"' in b for b in dlg_btns)),
+          (True, True, True, True, True))
+
+    check("clipHtml and drawClipDlg escape j.id in attributes and check r.queued === false in gdclip",
+          ('data-j="${j.id}"' not in clip_src and 'data-j="${j.id}"' not in dlg_src,
+           "r.queued === false" in app_html,
+           "S.status?.gdrive?.queued > 0" in app_html),
+          (True, True, True))
+
     node_bin = shutil.which("node")
     if node_bin:
         proc = subprocess.run([node_bin, "--check", str(js_tmp)], capture_output=True, text=True, timeout=20)
         check("inline JavaScript passes `node --check` syntax validation",
               (proc.returncode, proc.stderr.strip()),
               (0, ""))
+
+        boot_idx = combined_js.rfind('$("#collapseBtn").innerHTML')
+        core_js = combined_js[:boot_idx] if boot_idx > 0 else combined_js
+        harness_js = core_js + r"""
+;(() => {
+  const assert = (cond, msg) => { if (!cond) throw new Error("UI_ASSERT: " + msg); };
+
+  // 1. XSS scheme check on postPills & drawClipDlg + j.id escaping
+  for (const bad of ["javascript:alert(1)", "  JaVaScRiPt:alert(1) ", "data:text/html,<script>alert(1)</script>", "http://evil.example/a.mp4", "https://bad url with spaces"]) {
+    const p = postPills({drive: {id: "d1", url: bad}, posts: {}});
+    assert(!p.includes("<a ") && !p.includes("href=") && !p.toLowerCase().includes("javascript:") && !p.toLowerCase().includes("data:") && !p.includes("http://"), "postPills must reject unsafe URL: " + bad + " got: " + p);
+    assert(p.includes("Drive"), "postPills still shows plain Drive pill when c.drive is set without valid https URL");
+  }
+  const goodUrl = 'https://drive.google.com/file/d/abc_123/view?usp=drivesdk&x="q"';
+  const goodPill = postPills({drive: {id: "abc_123", url: goodUrl}, posts: {}});
+  assert(goodPill.includes('<a class="pill ok" href="https://drive.google.com/file/d/abc_123/view?usp=drivesdk&amp;x=&quot;q&quot;"'), "postPills escapes valid https Drive URL: " + goodPill);
+
+  S.status = {styles: {bounce: "Bounce"}, layouts: {blur: "Blur"}, languages: {pt: "PT"}, default_lang: "pt", gdrive: {ready: true, connected: true, queued: 0}};
+  S.accounts = [];
+  const xssJob = {id: 'job"xss>', status: "done", source: {type: "file"}, clips: [{id: 'c"1>', status: "done", file: "c1.mp4", cover: "c1.jpg", version: 1, start: 0, end: 10, hook: "H", title: "T", description: "D"}]};
+  const cardOut = clipHtml(xssJob, xssJob.clips[0]);
+  assert(cardOut.includes('data-j="job&quot;xss&gt;"') && !cardOut.includes('data-j="job"xss>"'), "clipHtml escapes j.id: " + cardOut);
+
+  // 2. Modal live-update & rawGone behavior across file multi-clip, all-archived with local=true, live, URL VOD, and empty Drive URL
+  const c1 = {id: "c1", status: "done", file: "c1.mp4", cover: "c1.jpg", version: 1, local: true, start: 0, end: 12, hook: "Hook1", title: "Title1", description: "Desc1", style: "bounce", layout: "blur"};
+  const c2 = {id: "c2", status: "done", file: "c2.mp4", cover: "c2.jpg", version: 1, local: true, start: 15, end: 25, hook: "Hook2", title: "Title2", description: "Desc2", style: "bounce", layout: "blur"};
+  const job = {id: "job_1", status: "done", source: {type: "file"}, clips: [c1, c2]};
+  S.jobs = [job];
+  D.jid = "job_1"; D.cid = "c1"; D.sig = "";
+
+  drawClipDlg(true);
+  const stageVideo0 = globalThis.__els["#stage"].videoNode;
+  assert(stageVideo0 && typeof stageVideo0 === "object", "initial #stage videoNode created");
+  assert(globalThis.__els["#clipdlg [data-act=remake]"].disabled === false, "unarchived clip allows remake");
+  assert(globalThis.__els["#darchnote"].innerHTML === "", "unarchived clip has empty #darchnote");
+  assert(globalThis.__els["#dfoot"].innerHTML.includes('data-act="gdclip"'), "unarchived clip shows Archive to Drive button");
+
+  // Archive 1 of 2 clips on uploaded file job -> source.mp4 still on disk -> remake stays ENABLED, stage <video> preserved!
+  c1.drive = {id: "drv1", url: "https://drive.google.com/file/d/drv1/view"};
+  c1.local = false;
+  drawClipDlg(false);
+  assert(globalThis.__els["#stage"].videoNode === stageVideo0, "drawClipDlg(false) preserves #stage <video> identity when status+version unchanged");
+  assert(globalThis.__els["#clipdlg [data-act=remake]"].disabled === false, "1 of 2 file clips archived keeps remake enabled");
+  assert(globalThis.__els["#darchnote"].innerHTML.includes("Google Drive") && !globalThis.__els["#darchnote"].innerHTML.includes("cannot be re-made"), "#darchnote shows archived note without rawGone warning");
+  assert(globalThis.__els["#dposts"].innerHTML.includes("Saved on Google Drive"), "#dposts live-updates with Drive pill");
+  assert(!globalThis.__els["#dfoot"].innerHTML.includes('data-act="gdclip"') && globalThis.__els["#dfoot"].innerHTML.includes("Open in Drive"), "#dfoot swaps Archive button for Open in Drive");
+
+  // Archive 2nd clip too, even while Windows holds c1.local = true -> allArchived is true -> remake DISABLED!
+  c1.local = true;
+  c2.drive = {id: "drv2", url: "https://drive.google.com/file/d/drv2/view"};
+  drawClipDlg(false);
+  assert(globalThis.__els["#stage"].videoNode === stageVideo0, "#stage <video> identity still preserved");
+  assert(globalThis.__els["#clipdlg [data-act=remake]"].disabled === true, "all file clips archived disables remake even if c.local===true");
+  assert(globalThis.__els["#darchnote"].innerHTML.includes("cannot be re-made"), "#darchnote explains raw source video was removed");
+
+  // Unsafe/missing c.drive.url still shows #darchnote explanation without rendering unsafe Open in Drive link
+  c1.drive = {id: "drv1", url: "javascript:alert(1)"};
+  drawClipDlg(false);
+  assert(globalThis.__els["#clipdlg [data-act=remake]"].disabled === true, "remake still disabled with unsafe c.drive.url");
+  assert(globalThis.__els["#darchnote"].innerHTML.includes("Google Drive"), "#darchnote still explains why remake is disabled even when safeHttps(url) is empty");
+  assert(!globalThis.__els["#dfoot"].innerHTML.includes("Open in Drive") && !globalThis.__els["#dfoot"].innerHTML.toLowerCase().includes("javascript:"), "#dfoot omits unsafe Open in Drive link");
+
+  // Live job with only 1 of 2 clips archived (and c1.local = true) -> remake DISABLED (.src.ts is per-clip)
+  c1.drive = {id: "drv1", url: "https://drive.google.com/file/d/drv1/view"};
+  delete c2.drive;
+  job.kind = "live";
+  drawClipDlg(false);
+  assert(globalThis.__els["#clipdlg [data-act=remake]"].disabled === true, "live archived clip disables remake immediately");
+
+  // URL VOD job with all clips archived -> remake ENABLED
+  delete job.kind;
+  job.source = {type: "url", url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"};
+  c2.drive = {id: "drv2", url: "https://drive.google.com/file/d/drv2/view"};
+  drawClipDlg(false);
+  assert(globalThis.__els["#clipdlg [data-act=remake]"].disabled === false, "URL VOD archived clip keeps remake enabled");
+  assert(globalThis.__els["#stage"].videoNode === stageVideo0, "#stage <video> identity preserved across all metadata updates");
+
+  // Version bump DOES replace #stage
+  c1.version = 2;
+  drawClipDlg(false);
+  assert(globalThis.__els["#stage"].videoNode !== stageVideo0, "#stage updates when clip version changes");
+
+  // 3. loop() polling interval stays fast (2000ms) while S.status.gdrive.queued > 0
+  globalThis.__lastDelay = null;
+  S.status.gdrive.queued = 2;
+  loop();
+  assert(globalThis.__lastDelay === 2000, "loop() uses 2000ms when gdrive.queued > 0, got " + globalThis.__lastDelay);
+  S.status.gdrive.queued = 0;
+  loop();
+  assert(globalThis.__lastDelay === 4000, "loop() uses 4000ms when idle and gdrive.queued === 0, got " + globalThis.__lastDelay);
+
+  console.log("UI_BEHAVIOR_OK");
+})();
+"""
+        runner_js = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync(process.argv[2], "utf8");
+const els = {};
+function makeEl(sel) {
+  let _html = "";
+  const el = {
+    sel,
+    disabled: false,
+    open: true,
+    hidden: true,
+    value: "",
+    checked: false,
+    dataset: {},
+    style: {},
+    videoNode: null,
+    classList: {toggle(){}, add(){}, remove(){}, contains(){ return false; }},
+    addEventListener(){},
+    setAttribute(){},
+    querySelector(s){ return getEl(sel + " " + s); },
+    querySelectorAll(){ return []; },
+    close(){ this.open = false; },
+    showModal(){ this.open = true; },
+    focus(){},
+    get innerHTML() { return _html; },
+    set innerHTML(v) {
+      _html = String(v ?? "");
+      if (sel === "#stage") {
+        this.videoNode = {src: _html};
+      }
+      if (sel === "#clipdlg") {
+        els["#stage"] = makeEl("#stage");
+        els["#stage"].innerHTML = "initial-stage";
+        els["#darchnote"] = makeEl("#darchnote");
+        els["#dposts"] = makeEl("#dposts");
+        els["#dfoot"] = makeEl("#dfoot");
+        const rm = makeEl("#clipdlg [data-act=remake]");
+        rm.disabled = /<button\b[^>]*data-act="remake"[^>]*\bdisabled\b/.test(_html);
+        els["#clipdlg [data-act=remake]"] = rm;
+      }
+    }
+  };
+  return el;
+}
+function getEl(sel) {
+  return (els[sel] ||= makeEl(sel));
+}
+const sandbox = {
+  console,
+  __els: els,
+  __lastDelay: null,
+  WeakMap, Map, Set, Promise, URL, URLSearchParams, Math, Date, Number, String, Boolean, Array, Object, RegExp, Error, TypeError, JSON, encodeURIComponent, decodeURIComponent,
+  performance: {now: () => 0},
+  localStorage: {getItem: () => null, setItem: () => {}},
+  sessionStorage: {getItem: () => null, removeItem: () => {}},
+  location: {pathname: "/app", search: "", hostname: "clips.example.com", href: "https://clips.example.com/app"},
+  history: {replaceState(){}, pushState(){}},
+  navigator: {clipboard: {writeText: async () => {}}},
+  matchMedia: () => ({matches: false}),
+  requestAnimationFrame: () => 1,
+  cancelAnimationFrame: () => {},
+  setTimeout: (_fn, ms) => { sandbox.__lastDelay = ms; return 1; },
+  clearTimeout: () => {},
+  setInterval: () => 1,
+  clearInterval: () => {},
+  addEventListener: () => {},
+  removeEventListener: () => {},
+  innerWidth: 1280,
+  innerHeight: 800,
+  document: {
+    hidden: false,
+    body: {append(){}, contains(){ return true; }},
+    addEventListener(){},
+    createElement: () => makeEl("created"),
+    querySelector: (s) => getEl(s),
+    querySelectorAll: () => [],
+  },
+};
+sandbox.window = sandbox;
+sandbox.globalThis = sandbox;
+vm.runInNewContext(code, sandbox, {filename: "index_behavior.js"});
+"""
+        beh_code_path = DATA_DIR / "index_behavior_payload.js"
+        beh_runner_path = DATA_DIR / "index_behavior_runner.js"
+        beh_code_path.write_text(harness_js, encoding="utf-8")
+        beh_runner_path.write_text(runner_js, encoding="utf-8")
+        proc_beh = subprocess.run(
+            [node_bin, str(beh_runner_path), str(beh_code_path)],
+            capture_output=True, text=True, timeout=20,
+        )
+        check("UI behavioral harness passes XSS scheme checks, modal live-update & rawGone matrix, and queue polling",
+              (proc_beh.returncode, "UI_BEHAVIOR_OK" in proc_beh.stdout, proc_beh.stderr.strip()),
+              (0, True, ""))
     else:
         check("inline JavaScript has balanced top-level script delimiters",
               ("</script>" not in combined_js and combined_js.count("{") == combined_js.count("}")),
