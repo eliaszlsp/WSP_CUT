@@ -108,7 +108,7 @@ _lock = threading.RLock()
 on_clip_ready: list = []   # callbacks (job, clip), run once when a clip first finishes
 
 DEFAULTS = {"max_clips": 6, "min_len": 15, "max_len": 60, "style": "bounce", "layout": "blur", "quality": 720,
-            "range_start": None, "range_end": None, "captions": True}
+            "range_start": None, "range_end": None, "captions": True, "output_lang": config.OUTPUT_LANG}
 
 
 LIMITS = {"max_clips": (1, 20), "min_len": (5, 120), "max_len": (10, 180), "quality": (360, 1080)}
@@ -132,6 +132,8 @@ def clean_options(options) -> dict:
             v = v if v in render.STYLES else DEFAULTS["style"]
         elif k == "layout":
             v = v if v in render.LAYOUTS else DEFAULTS["layout"]
+        elif k == "output_lang":
+            v = brain.clean_output_lang(v)
         else:                                    # range_start, range_end: seconds into the video
             v = float(v)
             if not math.isfinite(v) or v < 0:
@@ -207,6 +209,7 @@ def _load_file(f: Path, uid: str):
     job.setdefault("kind", "video")
     job.setdefault("creator", None)
     job.setdefault("options", {}).setdefault("captions", True)
+    job["options"].setdefault("output_lang", config.OUTPUT_LANG)
     if job.get("source_path"):
         job["source_path"] = _remap(job["source_path"], f.parent)
     if job.get("source", {}).get("path"):
@@ -219,6 +222,7 @@ def _load_file(f: Path, uid: str):
     buffered = job.get("kind") == "live" and any((f.parent / "buffer").glob("*.ts"))
     for c in job.get("clips", []):
         c.setdefault("captions", job["options"]["captions"])
+        c.setdefault("output_lang", job["options"]["output_lang"])
         if c.get("src"):
             c["src"] = _remap(c["src"], f.parent / "clips")
         if c.get("status") in ("rendering", "queued"):
@@ -288,7 +292,7 @@ def create(source: dict, options: dict, enqueue=True, creator=None, kind="video"
     c = creators.get(creator) if creator else None
     if c:
         d = creators.root(c["id"]) / ("live" if kind == "live" else "videos") / jid
-        base = {**DEFAULTS, **{k: c[k] for k in ("max_clips", "min_len", "max_len", "style", "layout", "captions")}}
+        base = {**DEFAULTS, **{k: c.get(k, DEFAULTS[k]) for k in ("max_clips", "min_len", "max_len", "style", "layout", "captions", "output_lang")}}
     else:
         d, base, creator = config.user_dir(ctx.uid()) / "jobs" / jid, dict(DEFAULTS), None
     opts = {**base, **clean_options(options)}
@@ -348,6 +352,8 @@ def request_render(jid, cid, changes: dict):
     new = dict(clip)
     if "captions" in changes:
         new.update(clean_options({"captions": changes["captions"]}))
+    if "output_lang" in changes:
+        new["output_lang"] = brain.clean_output_lang(changes["output_lang"])
     for k in ("start", "end"):
         if k in changes:
             new[k] = round(float(changes[k]), 2)
@@ -403,16 +409,18 @@ def render_one(job, clip, words):
 
 
 def _caption_words(job, clip, words, off):
-    span = [round(clip["start"], 2), round(clip["end"], 2), "en2"]      # "en2": captions made always-English
+    out_lang = brain.clean_output_lang(clip.get("output_lang") or (job.get("options") or {}).get("output_lang") or config.OUTPUT_LANG)
+    span = [round(clip["start"], 2), round(clip["end"], 2), f"lang:{out_lang}"]
     if clip.get("fixed_for") == span and clip.get("fixed_words") and not any(
             roman.needs_roman(w.get("w", "")) for w in clip["fixed_words"]):
-        raw = clip["fixed_words"]          # already tidied for this exact span: no second AI call
+        raw = clip["fixed_words"]          # already tidied for this exact span and language: no second AI call
     else:
         raw = [w for w in words if clip["start"] - 1 <= w["s"] <= clip["end"] + 1]
         try:
             usage.set_context(job.get("creator"), job.get("title") or "")
-            raw = brain.english_captions(raw, job.get("lang") or "", job.get("title") or "",
-                                         youtube_english=lambda: _english_part(job, clip))
+            raw = brain.captions_for(raw, job.get("lang") or "", job.get("title") or "",
+                                     output_lang=out_lang,
+                                     youtube_target=lambda: _youtube_part(job, clip, out_lang))
             clip.update(fixed_words=raw, fixed_for=span)
         except Exception:  # noqa: BLE001 - captions still render with the words as heard
             pass
@@ -448,20 +456,24 @@ def _wait_for_clips(job, futures, began, workers):
             time.sleep(1)
 
 
-def _english_part(job, clip):
-    """YouTube's English captions for just this clip, for a video in another language. Fetched once per video."""
-    if (job.get("source") or {}).get("type") != "url":
+def _youtube_part(job, clip, target_lang: str = "en"):
+    """YouTube's captions in `target_lang` ('pt' or 'en') for just this clip, fetched once per video."""
+    if (job.get("source") or {}).get("type") != "url" or target_lang not in ("pt", "en"):
         return None
-    f = Path(job["dir"]) / "words_en.json"
+    f = Path(job["dir"]) / f"words_{target_lang}.json"
     if f.is_file():
-        en = json.loads(f.read_text(encoding="utf-8"))
+        tr = json.loads(f.read_text(encoding="utf-8"))
     else:
         try:
-            en = media.youtube_english_words(job["source"]["url"]) or []
+            tr = media.youtube_target_words(job["source"]["url"], target_lang) or []
         except Exception:  # noqa: BLE001 - YouTube often refuses its translations: the AI translates instead
-            en = []
-        f.write_text(json.dumps(en), encoding="utf-8")       # asked once per video, refused or not
-    return [w for w in en if clip["start"] - 0.5 <= w["s"] <= clip["end"] + 0.5]
+            tr = []
+        f.write_text(json.dumps(tr), encoding="utf-8")       # asked once per video, refused or not
+    return [w for w in tr if clip["start"] - 0.5 <= w["s"] <= clip["end"] + 0.5]
+
+
+def _english_part(job, clip):
+    return _youtube_part(job, clip, "en")
 
 
 LONG_VIDEO = 40 * 60   # above this, fetch only the pieces that become clips
@@ -645,7 +657,7 @@ def _run_job(job):
         began[clip["id"]] = time.time()
         if src["type"] == "url" and (pieces or not whole_video()):
             _fetch_piece(job, clip, audio)
-        if clip["status"] != "error" and clip.get("captions", True) and yt and yt[1].lower().startswith("en"):
+        if clip["status"] != "error" and clip.get("captions", True) and yt and yt[1].lower().startswith(("en", "pt")):
             # The clip was found with YouTube's transcript. What is shown on screen comes from our own model,
             # run on just this clip: full punctuation, nothing blanked out, timings to the word.
             a0, b0 = max(lo, int((clip["start"] - 1.5) * 16000)), min(hi, int((clip["end"] + 1.5) * 16000))
@@ -736,7 +748,8 @@ def _run_job(job):
         quota = max(1, math.ceil(left / (len(blocks) - bi)))
         s0 = int((a - lo) / 16000)
         found, ai = brain.find_clips(bw, db[s0: s0 + int((b - a) / 16000) + 1], (b - a) / 16000, job["title"],
-                                     job["uploader"], quota, int(o["min_len"]), int(o["max_len"]), notes.append, game=game)
+                                     job["uploader"], quota, int(o["min_len"]), int(o["max_len"]), notes.append, game=game,
+                                     output_lang=o.get("output_lang", config.OUTPUT_LANG))
         tokens += ai.get("tokens", 0)
         model = ai.get("model") or model
         if ai.get("note"):
@@ -756,7 +769,8 @@ def _run_job(job):
         for c in found:
             c.update(id=f"clip{len(job['clips']) + 1:02d}", start=round(c["start"] + shift, 2),
                      end=round(c["end"] + shift, 2), style=o["style"], layout=o["layout"],
-                     captions=o.get("captions", True), status="queued", version=0)
+                     captions=o.get("captions", True), output_lang=o.get("output_lang", config.OUTPUT_LANG),
+                     status="queued", version=0)
             # Only the gameplay layout uses a webcam, so it is only looked for then, and only once: a
             # stream with no webcam is not looked for again on every clip of it.
             if o["layout"] == "gameplay" and face is False:

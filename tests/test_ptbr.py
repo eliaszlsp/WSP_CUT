@@ -5,7 +5,7 @@ import sys
 import tempfile
 
 os.environ["PEAKCUT_DATA"] = tempfile.mkdtemp(prefix="pc-ptbr-")
-os.environ["DATABASE_URL"] = ""
+os.environ.update(DATABASE_URL="", PEAKCUT_ACCOUNTS="0", PEAKCUT_PUBLIC_URL="http://127.0.0.1:8765")
 os.environ.pop("PEAKCUT_ASR_MODEL", None)
 os.environ.pop("PEAKCUT_OUTPUT_LANG", None)
 sys.path.insert(0, ".")
@@ -136,6 +136,71 @@ check("find_clips(output_lang='source') requests the same language spoken in the
       any("same language" in p.lower() for _, p in prompts_seen),
       True)
 
+# ---- Task 2: Creators, jobs, fixed_for cache invalidation on language change, live PT triggers & /api/status
+from fastapi.testclient import TestClient  # noqa: E402
+from studio import auth, creators, ctx, db, jobs, live, server  # noqa: E402
+
+db.init()
+owner = auth.local_user()
+with ctx.as_user(owner.id):
+    cr = creators.create({"name": "ViceLoop"})
+    check("new creator defaults to output_lang='pt' and includes PT trigger phrase",
+          (cr.get("output_lang"), "clipa" in cr.get("trigger_words", "")), ("pt", True))
+    cr_en = creators.update(cr["id"], {"output_lang": "en"})
+    check("creator output_lang updates to en", cr_en.get("output_lang"), "en")
+    cr_bad = creators.update(cr["id"], {"output_lang": "klingon"})
+    check("invalid creator output_lang normalizes safely to default", cr_bad.get("output_lang"), "pt")
+
+    creators.update(cr["id"], {"output_lang": "source"})
+    jb_inh = jobs.create({"type": "file", "path": "x.mp4", "name": "x.mp4"}, {}, enqueue=False, creator=cr["id"])
+    check("job inherits creator output_lang when omitted", jb_inh["options"].get("output_lang"), "source")
+    jb_ovr = jobs.create({"type": "file", "path": "y.mp4", "name": "y.mp4"}, {"output_lang": "en"}, enqueue=False, creator=cr["id"])
+    check("job explicit output_lang overrides creator default", jb_ovr["options"].get("output_lang"), "en")
+
+    # Cache invalidation in jobs._caption_words when switching clip output_lang from en -> pt
+    jb_ovr["lang"] = "en"
+    clip_obj = {"id": "clip01", "start": 0.0, "end": 6.0, "status": "done", "style": "bounce", "layout": "blur", "captions": True, "output_lang": "en"}
+    jb_ovr["clips"] = [clip_obj]
+    fixed_reply[:] = ["Wait,", "look", "at", "that.", "No", "way,", "bro!"]
+    cap_en = jobs._caption_words(jb_ovr, clip_obj, en_src, 0.0)
+    check("first render caches English captions under lang:en",
+          ("Wait," in joined(cap_en), clip_obj.get("fixed_for")), (True, [0.0, 6.0, "lang:en"]))
+    trans_reply[:] = ["Espera, olha aquilo.", "Sem chance, mano!"]
+    jobs._q.put = lambda *a, **k: None
+    jobs.request_render(jb_ovr["id"], "clip01", {"output_lang": "pt"})
+    check("request_render updates clip output_lang to pt", clip_obj.get("output_lang"), "pt")
+    cap_pt = jobs._caption_words(jb_ovr, clip_obj, en_src, 0.0)
+    check("changing output_lang to pt invalidates fixed_for cache and translates captions",
+          ("Espera," in joined(cap_pt), clip_obj.get("fixed_for")), (True, [0.0, 6.0, "lang:pt"]))
+
+# Live PT-BR voice triggers ("clipa", "corta isso", and accent-folded custom "clipa aí")
+dummy_live = type("DummyLive", (), {
+    "CLIP_WORDS": live.Session.CLIP_WORDS,
+    "SAID_GAP": 45,
+    "last_said": -100.0,
+    "said": None,
+    "last_trigger": -100.0,
+    "manual": [],
+    "settings": {"trigger_words": "clipa aí"},
+})()
+live.Session._triggers(dummy_live, [{"w": "Clipa!", "s": 50.0, "e": 50.4}])
+check("live built-in trigger catches spoken 'Clipa!'", bool(dummy_live.said and dummy_live.said["t"] == 50.0), True)
+dummy_live.said = None
+dummy_live.last_said = -100.0
+live.Session._triggers(dummy_live, [{"w": "corta", "s": 120.0, "e": 120.3}, {"w": "isso", "s": 120.4, "e": 120.8}])
+check("live built-in trigger catches two-word 'corta isso'", bool(dummy_live.said and dummy_live.said["t"] == 120.0), True)
+live.Session._triggers(dummy_live, [{"w": "clipa", "s": 200.0, "e": 200.3}, {"w": "ai", "s": 200.4, "e": 200.7}])
+check("live custom trigger folds accents so 'clipa aí' matches unaccented ASR 'clipa ai'",
+      len(dummy_live.manual) == 1 and "clipa aí" in dummy_live.manual[0]["why"],
+      True)
+
+client = TestClient(server.app, base_url="http://127.0.0.1:8765")
+st_json = client.get("/api/status").json()
+check("/api/status exposes languages map and default_lang",
+      (st_json.get("languages"), st_json.get("default_lang")),
+      ({"pt": "Português (BR)", "source": "Same as spoken", "en": "English"}, "pt"))
+
 print("ALL PASSED" if not fails else f"{len(fails)} failed")
+db.engine.dispose()
 shutil.rmtree(os.environ["PEAKCUT_DATA"], ignore_errors=True)
 sys.exit(1 if fails else 0)

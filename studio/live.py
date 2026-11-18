@@ -471,7 +471,8 @@ class Session:
         try:
             cands, tok = brain.judge_transcript(win, ws, now, title, up, st["min_len"], st["max_len"], self.job["clips"],
                                                 n=1 if every <= 2 else 2, must=must, game=self._game(),
-                                                timeout=config.LIVE_AI_TIMEOUT)  # Auto (0) asks for one
+                                                timeout=config.LIVE_AI_TIMEOUT,
+                                                output_lang=st.get("output_lang", config.OUTPUT_LANG))  # Auto (0) asks for one
         except Exception as e:  # noqa: BLE001
             self.job["ai"]["last_error"] = str(e)[-200:]
             return self._verdict(verdict, "AI error: " + str(e)[-80:])
@@ -526,24 +527,31 @@ class Session:
         self.verdicts.append(dict(v, result=result))
         del self.verdicts[:-6]
 
-    CLIP_WORDS = re.compile(r"\bclip(\s+(it|that|this))?\b", re.I)
+    CLIP_WORDS = re.compile(r"\b(clip|clipa)(\s+(it|that|this|isso|ai|aqui))?\b", re.I)
     SAID_BEFORE, SAID_AFTER, SAID_GAP = 60, 15, 45
 
     def _triggers(self, new_words):
-        """Built in: when someone says "clip" ("clip it", "clip that"), the AI looks at that moment as soon as its
+        """Built in: when someone says "clip" / "clipa" / "corta isso", the AI looks at that moment as soon as its
         transcript is ready; people say it right after something worth clipping. Then the creator's own trigger
         phrases from Setup, which clip straight away with no AI check."""
-        for w in new_words or []:
-            if self.CLIP_WORDS.search(re.sub(r"[^a-z' ]", "", w["w"].lower())) and w["s"] - self.last_said > self.SAID_GAP \
-                    and not self.said:
-                self.said = {"t": w["s"], "why": 'Someone said "clip"'}
-                self.last_said = w["s"]
-        phrases = [p.strip().lower() for p in self.settings.get("trigger_words", "").split(",") if p.strip()]
-        if not phrases or not new_words:
+        if not new_words:
             return
-        key = [re.sub(r"[^a-z0-9']", "", w["w"].lower()) for w in new_words]
+        folded = [re.sub(r"[^a-z0-9' ]", "", brain._ascii_fold(w["w"]).lower()).strip() for w in new_words]
+        for idx, (w, fw) in enumerate(zip(new_words, folded)):
+            two = f"{fw} {folded[idx + 1]}" if idx + 1 < len(folded) else ""
+            is_builtin = bool(self.CLIP_WORDS.search(fw)) or two in ("corta isso", "corta ai")
+            if is_builtin and w["s"] - self.last_said > self.SAID_GAP and not self.said:
+                self.said = {"t": w["s"], "why": 'Someone said "clipa"' if ("clipa" in fw or two.startswith("corta")) else 'Someone said "clip"'}
+                self.last_said = w["s"]
+        phrases = [p.strip() for p in self.settings.get("trigger_words", "").split(",") if p.strip()]
+        if not phrases:
+            return
+        key = [re.sub(r"[^a-z0-9']", "", brain._ascii_fold(w["w"]).lower()) for w in new_words]
         for p in phrases:
-            parts = [re.sub(r"[^a-z0-9']", "", x) for x in p.split()]
+            parts = [re.sub(r"[^a-z0-9']", "", brain._ascii_fold(x).lower()) for x in p.split()]
+            parts = [x for x in parts if x]
+            if not parts:
+                continue
             for i in range(len(key) - len(parts) + 1):
                 if key[i:i + len(parts)] == parts:
                     t = new_words[i]["s"]
@@ -557,7 +565,8 @@ class Session:
             usage.set_context(self.job["creator"], self.job["title"] or "Live stream")
             try:
                 c = brain.describe(text, self.job["title"], self.job["uploader"], game=self._game(),
-                                   timeout=config.LIVE_AI_TIMEOUT)
+                                   timeout=config.LIVE_AI_TIMEOUT,
+                                   output_lang=self.settings.get("output_lang", config.OUTPUT_LANG))
             except Exception as e:  # noqa: BLE001
                 # Someone asked for this clip by hand. A slow or broken AI costs it its hook, not the clip.
                 self.job["ai"]["last_error"] = str(e)[-200:]
@@ -572,7 +581,9 @@ class Session:
     def _add_clip(self, c):
         self.n += 1
         c.update(id=f"clip{self.n:03d}", style=self.settings["style"], layout=self.settings["layout"],
-                 captions=self.job["options"].get("captions", True), status="queued", version=0, made_at=time.time())
+                 captions=self.job["options"].get("captions", True),
+                 output_lang=self.job["options"].get("output_lang") or self.settings.get("output_lang") or config.OUTPUT_LANG,
+                 status="queued", version=0, made_at=time.time())
         with self.lock:
             self.job["clips"].append(c)
         jobs.save(self.job)
