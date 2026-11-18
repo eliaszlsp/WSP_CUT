@@ -1,8 +1,10 @@
-"""Google Drive archive primitives: OAuth connect/disconnect, token refresh, folder hierarchy, resumable chunked
-uploads with byte-size verification, and on-demand local cache."""
+"""Google Drive archive primitives: OAuth connect/disconnect, token refresh, concurrency safety, Trash & 404 folder
+recovery, resumable chunked uploads with byte-size verification, secret redaction, and streaming local cache."""
 import atexit
+import contextlib
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -62,6 +64,17 @@ class FakeResp:
         return self._data
 
 
+class FakeStream:
+    def __init__(self, status_code, chunks, headers=None):
+        self.status_code = status_code
+        self._chunks = chunks
+        self.headers = headers or {}
+
+    def iter_bytes(self, _chunk_size=8192):
+        for c in self._chunks:
+            yield c
+
+
 try:
     boss, _ = auth._create("boss@example.com", "boss", password_hash="x")
     alice, _ = auth._create("alice@example.com", "alice", password_hash="x")
@@ -85,18 +98,25 @@ try:
     with ctx.as_user(alice.id):
         check("can_connect reflects Google app keys", gdrive.can_connect(), True)
 
-    # ---- Stand-in Google OAuth + Drive v3 server
+    # ---- Stand-in Google OAuth + Drive v3 server (real Drive Trash semantics: trashed=True returns 200, deleted returns 404)
     state_mock = {
         "email": "vault@example.com",
         "limit": "2000000000000",
         "usage": "500000000000",
         "give_refresh": True,
+        "give_access": True,
         "about_fail": False,
+        "about_error_text": None,
         "folders": {},          # id -> {"name": ..., "parent": ..., "trashed": False}
         "next_fid": 1,
-        "uploads": {},          # upload_url -> {"name": ..., "parent": ..., "size": int, "buf": bytearray(), "ReportSize": None}
+        "uploads": {},          # upload_url -> {"id": ..., "name": ..., "parent": ..., "size": int, "buf": bytearray()}
         "files": {},            # file_id -> bytes
         "report_size": None,
+        "put_fail_text": None,
+        "truncate_bytes": None,
+        "bad_content_length": None,
+        "on_token_refresh": None,
+        "on_folder_create": None,
         "calls": [],
         "media_delay": 0.0,
     }
@@ -108,35 +128,48 @@ try:
         if url == "https://oauth2.googleapis.com/token":
             gt = (data or {}).get("grant_type")
             if gt == "authorization_code":
-                tok = {"access_token": "gd-access-1", "expires_in": 3600}
+                tok = {"expires_in": 3600}
+                if state_mock["give_access"]:
+                    tok["access_token"] = "gd-access-1"
                 if state_mock["give_refresh"]:
                     tok["refresh_token"] = "gd-refresh-1"
                 return FakeResp(200, tok)
             if gt == "refresh_token":
+                hook = state_mock["on_token_refresh"]
+                if hook:
+                    hook()
                 if (data or {}).get("refresh_token") != "gd-refresh-1":
                     return FakeResp(400, {"error": "invalid_grant"})
-                return FakeResp(200, {"access_token": "gd-access-refreshed", "expires_in": 3600})
+                tok = {"expires_in": 3600}
+                if state_mock["give_access"]:
+                    tok["access_token"] = "gd-access-refreshed"
+                return FakeResp(200, tok)
             return FakeResp(400, {"error": "unsupported_grant_type"})
 
         if url.startswith("https://www.googleapis.com/drive/v3/files"):
+            hook = state_mock["on_folder_create"]
+            if hook:
+                hook()
             parent = ((json or {}).get("parents") or ["root"])[0]
-            if parent != "root" and (parent not in state_mock["folders"] or state_mock["folders"][parent]["trashed"]):
+            # Real Drive v3: 404 ONLY if permanently deleted; trashed parent still accepts child (200 OK)!
+            if parent != "root" and parent not in state_mock["folders"]:
                 return FakeResp(404, {"error": {"code": 404, "message": "Parent not found"}})
             with mock_lock:
                 fid = f"fld_{state_mock['next_fid']}"
                 state_mock["next_fid"] += 1
                 state_mock["folders"][fid] = {"name": json["name"], "parent": parent, "trashed": False}
-            return FakeResp(200, {"id": fid})
+            return FakeResp(200, {"id": fid, "trashed": False})
 
         if url == "https://www.googleapis.com/upload/drive/v3/files":
             parent = ((json or {}).get("parents") or [""])[0]
-            if parent not in state_mock["folders"] or state_mock["folders"][parent]["trashed"]:
+            # Real Drive v3: 404 ONLY if permanently deleted; trashed parent returns 200 OK!
+            if parent not in state_mock["folders"]:
                 return FakeResp(404, {"error": {"code": 404, "message": "Folder not found"}})
             size = int((headers or {}).get("X-Upload-Content-Length", "0"))
             with mock_lock:
                 idx = state_mock["next_fid"]
                 state_mock["next_fid"] += 1
-                up_url = f"https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id=up_{idx}"
+                up_url = f"https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id=up_secret_{idx}"
                 state_mock["uploads"][up_url] = {
                     "id": f"drv_file_{idx}",
                     "name": json["name"],
@@ -152,6 +185,8 @@ try:
         with mock_lock:
             state_mock["calls"].append(("GET", url, params, None, headers or {}))
         if "/drive/v3/about" in url:
+            if state_mock["about_error_text"]:
+                return FakeResp(500, text=state_mock["about_error_text"])
             if state_mock["about_fail"]:
                 return FakeResp(503, {"error": "unavailable"})
             return FakeResp(200, {
@@ -161,10 +196,8 @@ try:
 
         if url == "https://www.googleapis.com/drive/v3/files" and params and "q" in params:
             q = params["q"]
-            # Parse name='...' and '<parent>' in parents (handling \' escapes)
-            import re as _re
-            m_name = _re.search(r"name='((?:\\.|[^'])*)'", q)
-            m_par = _re.search(r"'((?:\\.|[^'])*)' in parents", q)
+            m_name = re.search(r"name='((?:\\.|[^'])*)'", q)
+            m_par = re.search(r"'((?:\\.|[^'])*)' in parents", q)
             want_name = m_name.group(1).replace("\\'", "'").replace("\\\\", "\\") if m_name else ""
             want_par = m_par.group(1).replace("\\'", "'").replace("\\\\", "\\") if m_par else "root"
             found = [
@@ -174,25 +207,40 @@ try:
             ]
             return FakeResp(200, {"files": found[:1]})
 
-        if "?alt=media" in url or (params and params.get("alt") == "media"):
-            if state_mock["media_delay"]:
-                time.sleep(state_mock["media_delay"])
+        if url.startswith("https://www.googleapis.com/drive/v3/files/") and "?alt=media" not in url:
             fid = url.split("/files/")[1].split("?")[0]
-            blob = state_mock["files"].get(fid)
-            if blob is None:
-                return FakeResp(404, {"error": "missing"})
-            return FakeResp(200, content=blob)
+            info = state_mock["folders"].get(fid)
+            if not info:
+                return FakeResp(404, {"error": {"code": 404, "message": "File not found"}})
+            return FakeResp(200, {"id": fid, "name": info["name"], "trashed": info["trashed"]})
 
         return FakeResp(404, {"error": "not found"})
+
+    @contextlib.contextmanager
+    def fake_stream(method, url, headers=None, timeout=None, follow_redirects=None):
+        with mock_lock:
+            state_mock["calls"].append((method, url, None, "stream", headers or {}))
+        if state_mock["media_delay"]:
+            time.sleep(state_mock["media_delay"])
+        fid = url.split("/files/")[1].split("?")[0]
+        blob = state_mock["files"].get(fid)
+        if blob is None:
+            yield FakeStream(404, [])
+            return
+        send_blob = blob[:state_mock["truncate_bytes"]] if state_mock["truncate_bytes"] is not None else blob
+        cl = state_mock["bad_content_length"] if state_mock["bad_content_length"] is not None else len(blob)
+        mid = max(1, len(send_blob) // 2)
+        yield FakeStream(200, [send_blob[:mid], send_blob[mid:]], headers={"Content-Length": str(cl)})
 
     def fake_put(url, content=None, headers=None, timeout=None):
         with mock_lock:
             state_mock["calls"].append(("PUT", url, None, len(content or b""), headers or {}))
+        if state_mock["put_fail_text"]:
+            return FakeResp(502, text=state_mock["put_fail_text"])
         up = state_mock["uploads"].get(url)
         if not up:
             return FakeResp(404, {"error": "bad upload session"})
         rng = (headers or {}).get("Content-Range", "")
-        # bytes first-last/total
         spec, total_s = rng.replace("bytes ", "").split("/")
         first_s, last_s = spec.split("-")
         first, last, total = int(first_s), int(last_s), int(total_s)
@@ -213,19 +261,28 @@ try:
     gdrive.httpx.post = fake_post
     gdrive.httpx.get = fake_get
     gdrive.httpx.put = fake_put
+    gdrive.httpx.stream = fake_stream
 
-    # ---- 2. OAuth flow, state validation, cross-user rejection, missing refresh_token, redaction
+    # ---- 2. OAuth flow, 24-byte state + 5000 cap, cross-user rejection, missing tokens, redaction
     with ctx.as_user(alice.id):
-        gdrive._states["stale_state"] = (alice.id, time.time() - 950)
+        now = time.time()
+        for i in range(5010):
+            gdrive._states[f"fill_{i}"] = (bob.id, now - 10 + i * 0.0001)
+        gdrive._states["stale_state"] = (alice.id, now - 950)
         auth_url = gdrive.connect_url()
-        check("expired states are purged on connect_url", "stale_state" not in gdrive._states, True)
+        check("expired states purged and _states capped at 5000",
+              ("stale_state" not in gdrive._states, len(gdrive._states) <= 5000),
+              (True, True))
         parsed = urlparse(auth_url)
         qs = parse_qs(parsed.query)
         state = qs["state"][0]
+        check("state uses 24+ bytes of entropy", len(state) >= 32, True)
         check("connect_url targets Google OAuth with offline consent and drive.file scope",
               (parsed.netloc, qs["client_id"][0], qs["access_type"][0], qs["prompt"][0],
                "drive.file" in qs["scope"][0] and "userinfo.email" in qs["scope"][0]),
               ("accounts.google.com", "gdrive-client-123.apps", "offline", "consent", True))
+        gdrive._states.clear()
+        state = parse_qs(urlparse(gdrive.connect_url()).query)["state"][0]
 
     with ctx.as_user(bob.id):
         try:
@@ -235,6 +292,16 @@ try:
             check("cross-user OAuth callback is rejected", True)
 
     with ctx.as_user(alice.id):
+        # Missing access_token raises RuntimeError
+        state_mock["give_access"] = False
+        s_noacc = parse_qs(urlparse(gdrive.connect_url()).query)["state"][0]
+        try:
+            gdrive.connect_finish("code-noacc", s_noacc)
+            check("missing access_token in connect_finish raises RuntimeError", False)
+        except RuntimeError:
+            check("missing access_token in connect_finish raises RuntimeError", True)
+        state_mock["give_access"] = True
+
         # Missing refresh_token gives friendly guidance
         state_mock["give_refresh"] = False
         s_noref = parse_qs(urlparse(gdrive.connect_url()).query)["state"][0]
@@ -275,7 +342,7 @@ try:
         cfg_file = config.user_dir(alice.id) / "accounts" / "gdrive.json"
         check("gdrive.json written on disk", cfg_file.is_file(), True)
 
-    # ---- 3. Settings, forget_mem, token refresh, quota failure fallback
+    # ---- 3. Settings validation, malformed config coercion, forget_mem, token refresh & concurrency races
     with ctx.as_user(alice.id):
         v0 = ctx.version(alice.id)
         s1 = gdrive.save_settings({"auto_after_post": False, "auto_days": 999})
@@ -284,7 +351,32 @@ try:
               (False, 365, True))
         s2 = gdrive.save_settings({"auto_days": -10})
         check("save_settings clamps negative auto_days to 0", s2["auto_days"], 0)
+        try:
+            gdrive.save_settings({"auto_days": True})
+            check("save_settings rejects boolean auto_days", False)
+        except ValueError:
+            check("save_settings rejects boolean auto_days", True)
         gdrive.save_settings({"auto_after_post": True, "auto_days": 5})
+
+        # Malformed JSON fields coerced safely in _copy_cfg
+        malformed = gdrive._copy_cfg({
+            "connected": None,
+            "email": None,
+            "refresh_token": None,
+            "access_token": None,
+            "expires": "not-a-float",
+            "auto_after_post": None,
+            "auto_days": True,
+            "folders": ["not-a-dict"],
+            "archived_bytes": "bad",
+            "archived_count": None,
+            "last_error": None,
+        })
+        check("_copy_cfg coerces malformed/null fields to safe DEFAULTS types",
+              (malformed["connected"], malformed["email"], malformed["expires"], malformed["auto_after_post"],
+               malformed["auto_days"], malformed["folders"], malformed["archived_bytes"], malformed["archived_count"],
+               malformed["last_error"]),
+              (False, "", 0.0, True, 3, {}, 0, 0, ""))
 
         # Force token expiry on disk and test forget_mem + _token refresh
         on_disk = json.loads(cfg_file.read_text(encoding="utf-8"))
@@ -296,31 +388,122 @@ try:
 
         cfg = gdrive._cfg()
         check("forget_mem reloads persisted values from disk", (cfg["archived_bytes"], cfg["archived_count"]), (123456, 4))
+
+        # Race 1: save_settings() runs mid-flight during _token(cfg) -> settings MUST NOT be overwritten!
+        state_mock["on_token_refresh"] = lambda: gdrive.save_settings({"auto_days": 42})
         tok_new = gdrive._token(cfg)
+        state_mock["on_token_refresh"] = None
         check("expired token refreshes via OAuth refresh_token", tok_new, "gd-access-refreshed")
         persisted = json.loads(cfg_file.read_text(encoding="utf-8"))
-        check("refreshed token is persisted to gdrive.json", persisted["access_token"], "gd-access-refreshed")
+        check("_token merge preserves concurrent save_settings update",
+              (persisted["access_token"], persisted["auto_days"], cfg["auto_days"]),
+              ("gd-access-refreshed", 42, 42))
+        gdrive.save_settings({"auto_days": 5})
 
         # Valid cached token makes zero token POSTs
         calls_before = len(state_mock["calls"])
         check("unexpired token returned without HTTP call", gdrive._token(gdrive._cfg()), "gd-access-refreshed")
         check("no HTTP call when token is fresh", len(state_mock["calls"]), calls_before)
 
+        # Missing access_token during _token refresh raises RuntimeError
+        stale_cfg = gdrive._cfg()
+        stale_cfg["expires"] = 0.0
+        state_mock["give_access"] = False
+        try:
+            gdrive._token(stale_cfg)
+            check("_token raises RuntimeError when refresh lacks access_token", False)
+        except RuntimeError:
+            check("_token raises RuntimeError when refresh lacks access_token", True)
+        state_mock["give_access"] = True
+
+        # Race 2: disconnect() runs mid-flight during _token(cfg) -> credentials MUST NOT resurrect!
+        stale_cfg2 = gdrive._cfg()
+        stale_cfg2["expires"] = 0.0
+        state_mock["on_token_refresh"] = lambda: gdrive.disconnect()
+        try:
+            gdrive._token(stale_cfg2)
+            check("_token aborts when user disconnected mid-refresh", False)
+        except RuntimeError as e:
+            check("_token aborts when user disconnected mid-refresh", "disconnected" in str(e).lower())
+        state_mock["on_token_refresh"] = None
+        after_disc = json.loads(cfg_file.read_text(encoding="utf-8"))
+        check("disconnect during _token is never overwritten by stale refresh",
+              (after_disc["connected"], after_disc["access_token"], after_disc["refresh_token"]),
+              (False, "", ""))
+
+        # Reconnect Alice to continue tests
+        s_reconn = parse_qs(urlparse(gdrive.connect_url()).query)["state"][0]
+        gdrive.connect_finish("code-back", s_reconn)
+
         # Quota error returns None gracefully
         state_mock["about_fail"] = True
         check("quota returns None gracefully on Drive API error", gdrive.quota(), None)
         state_mock["about_fail"] = False
 
-    # ---- 4. Folder hierarchy: sanitization, search-before-create, caching, reconnect behavior, 404 recovery
+    # ---- 4. Secret redaction in _check(), upload_mp4(), and public_status()["last_error"]
+    with ctx.as_user(alice.id):
+        raw_err = (
+            "Auth failed: Bearer gd-access-1 refresh=gd-refresh-1 "
+            "secret=gdrive-secret-xyz upload_id=up_secret_token_777"
+        )
+        redacted = gdrive._redact(raw_err, gdrive._cfg())
+        check("_redact scrubs access_token, refresh_token, client_secret, Bearer and upload_id",
+              any(x in redacted for x in ("gd-access-1", "gd-refresh-1", "gdrive-secret-xyz", "up_secret_token_777")),
+              False)
+
+        # Verify public_status()["last_error"] redacts leaked secrets from disk
+        disk_leak = json.loads(cfg_file.read_text(encoding="utf-8"))
+        disk_leak["last_error"] = raw_err
+        cfg_file.write_text(json.dumps(disk_leak), encoding="utf-8")
+        gdrive.forget_mem(alice.id)
+        st_leak = gdrive.public_status(include_quota=False)
+        check("public_status redacts secrets in last_error",
+              any(x in st_leak["last_error"] for x in ("gd-access-1", "gd-refresh-1", "gdrive-secret-xyz", "up_secret_token_777")),
+              False)
+        # Verify _check() also redacts HTTP error bodies directly
+        disk_leak["last_error"] = ""
+        cfg_file.write_text(json.dumps(disk_leak), encoding="utf-8")
+        gdrive.forget_mem(alice.id)
+        state_mock["about_error_text"] = raw_err
+        try:
+            gdrive._check(gdrive.httpx.get("https://www.googleapis.com/drive/v3/about"), "Drive check", gdrive._cfg())
+            check("_check scrubs secrets from HTTP error body", False)
+        except RuntimeError as e:
+            check("_check scrubs secrets from HTTP error body",
+                  any(x in str(e) for x in ("gd-access-1", "gd-refresh-1", "gdrive-secret-xyz", "up_secret_token_777")),
+                  False)
+        state_mock["about_error_text"] = None
+
+        # Race 3b: disconnect() during folder_for() must NOT overwrite disconnected state or store folders!
+        cfg_disc_race = gdrive._cfg()
+        state_mock["on_folder_create"] = lambda: gdrive.disconnect()
+        _ = gdrive.folder_for(cfg_disc_race, "RaceCreator")
+        state_mock["on_folder_create"] = None
+        after_folder_disc = json.loads(cfg_file.read_text(encoding="utf-8"))
+        check("disconnect during folder_for is never overwritten by folder merge",
+              (after_folder_disc["connected"], after_folder_disc["folders"]),
+              (False, {}))
+        state_mock["folders"].clear()
+        state_mock["next_fid"] = 1
+        s_reconn2 = parse_qs(urlparse(gdrive.connect_url()).query)["state"][0]
+        gdrive.connect_finish("code-back2", s_reconn2)
+
+    # ---- 5. Folder hierarchy: sanitization, search-before-create, caching, Trash (200) & Deleted (404) recovery, concurrency
     ts_nov = time.mktime((2026, 11, 18, 12, 0, 0, 0, 0, -1))
     with ctx.as_user(alice.id):
         cfg = gdrive._cfg()
+        # Race 3: save_settings() during folder_for() must not be overwritten!
+        state_mock["on_folder_create"] = lambda: gdrive.save_settings({"auto_days": 19})
         state_mock["calls"].clear()
         fid1 = gdrive.folder_for(cfg, '  Bob\'s: <Stream>? /Clips*.. ', ts=ts_nov)
-        created_names = [
-            state_mock["folders"][k]["name"]
-            for k in ("fld_1", "fld_2", "fld_3")
-        ]
+        state_mock["on_folder_create"] = None
+        check("folder_for merge preserves concurrent save_settings update",
+              (gdrive._cfg()["auto_days"], cfg["auto_days"]),
+              (19, 19))
+        gdrive.save_settings({"auto_days": 5})
+        cfg = gdrive._cfg()
+
+        created_names = [state_mock["folders"][k]["name"] for k in ("fld_1", "fld_2", "fld_3")]
         check("folder_for sanitizes creator name and builds PeakCut -> Creator -> YYYY-MM",
               created_names,
               ["PeakCut", "Bob's- -Stream- -Clips-", "2026-11"])
@@ -339,7 +522,7 @@ try:
         check("General creator folder created under PeakCut root",
               state_mock["folders"][cfg["folders"]["c:General"]]["name"], "General")
 
-        # Simulate drop_folder_cache (e.g. after reconnect): searches Drive and reuses existing folders without duplicating!
+        # Simulate drop_folder_cache: searches Drive and reuses existing folders without duplicating
         folder_count_before = len(state_mock["folders"])
         gdrive.drop_folder_cache(cfg)
         check("drop_folder_cache clears folders dict", cfg["folders"], {})
@@ -348,15 +531,25 @@ try:
               (fid_reused == fid1, len(state_mock["folders"])),
               (True, folder_count_before))
 
-        # Cached parent trashed on Drive: folder_for automatically drops cache and rebuilds
+        # Cached parent TRASHED on Drive (returns 200 with trashed=True in real Drive v3!): folder_for detects Trash and rebuilds!
         ts_dec = time.mktime((2026, 12, 5, 12, 0, 0, 0, 0, -1))
         gdrive.folder_for(cfg, "General", ts=ts_nov)
-        creator_fld_old = cfg["folders"]["c:General"]
-        state_mock["folders"][creator_fld_old]["trashed"] = True
+        creator_fld_trashed = cfg["folders"]["c:General"]
+        state_mock["folders"][creator_fld_trashed]["trashed"] = True
         fid_dec = gdrive.folder_for(cfg, "General", ts=ts_dec)
-        check("folder_for recovers when cached parent folder was trashed on Drive",
-              (state_mock["folders"][fid_dec]["name"], cfg["folders"]["c:General"] != creator_fld_old),
-              ("2026-12", True))
+        new_parent = state_mock["folders"][fid_dec]["parent"]
+        check("folder_for detects trashed=True parent (even when Drive returns 200) and rebuilds non-trashed folder",
+              (state_mock["folders"][fid_dec]["name"], new_parent != creator_fld_trashed, not state_mock["folders"][new_parent]["trashed"]),
+              ("2026-12", True, True))
+
+        # Cached parent PERMANENTLY DELETED on Drive (404): folder_for also recovers!
+        ts_jan = time.mktime((2027, 1, 5, 12, 0, 0, 0, 0, -1))
+        creator_fld_deleted = cfg["folders"]["c:General"]
+        state_mock["folders"].pop(creator_fld_deleted)
+        fid_jan = gdrive.folder_for(cfg, "General", ts=ts_jan)
+        check("folder_for recovers when cached parent folder was permanently deleted (404)",
+              (state_mock["folders"][fid_jan]["name"], cfg["folders"]["c:General"] != creator_fld_deleted),
+              ("2027-01", True))
 
         # Reconnecting with the SAME email preserves cached folders
         s_same = parse_qs(urlparse(gdrive.connect_url()).query)["state"][0]
@@ -374,14 +567,13 @@ try:
               (cfg_after_re["email"], cfg_after_re["folders"], cfg_after_re["auto_days"], cfg_after_re["archived_count"]),
               ("second-drive@example.com", {}, 5, 4))
 
-    # ---- 5. Resumable multi-chunk upload (8 MB chunks) + size mismatch rejection + 404 folder signal
+    # ---- 6. Resumable multi-chunk upload + size mismatch + Trash (200) & 404 folder rejection + error redaction
     with ctx.as_user(alice.id):
         cfg = gdrive._cfg()
         target_folder = gdrive.folder_for(cfg, "StreamerX", ts=ts_nov)
         clip_dir = DATA_DIR / "job_up" / "clips"
         clip_dir.mkdir(parents=True, exist_ok=True)
         big_clip = clip_dir / "clip01.mp4"
-        # 2 * CHUNK + 12345 bytes -> 3 chunks (8 MB -> 308, 8 MB -> 308, 12345 B -> 200)
         payload = (b"ABCD1234" * ((2 * gdrive.CHUNK) // 8)) + (b"Z" * 12345)
         big_clip.write_bytes(payload)
 
@@ -401,9 +593,19 @@ try:
         check("uploaded bytes on Drive match local payload byte-for-byte",
               state_mock["files"][res["id"]] == payload, True)
 
-        # Size mismatch must raise RuntimeError and keep local file
+        # PUT error scrubs secrets and upload_id
         small_clip = clip_dir / "clip02.mp4"
         small_clip.write_bytes(b"mp4data" * 500)
+        state_mock["put_fail_text"] = "Failed at upload_id=up_secret_999 with Bearer gd-access-1"
+        try:
+            gdrive.upload_mp4(cfg, small_clip, target_folder, "clip02.mp4")
+            check("upload_mp4 redacts secrets from PUT error", False)
+        except RuntimeError as e:
+            check("upload_mp4 redacts secrets from PUT error",
+                  "up_secret_999" not in str(e) and "gd-access-1" not in str(e))
+        state_mock["put_fail_text"] = None
+
+        # Size mismatch must raise RuntimeError and keep local file
         state_mock["report_size"] = 999
         try:
             gdrive.upload_mp4(cfg, small_clip, target_folder, "clip02.mp4")
@@ -412,24 +614,32 @@ try:
             check("upload_mp4 rejects byte-size mismatch", "size mismatch" in str(e).lower() and small_clip.is_file())
         state_mock["report_size"] = None
 
-        # Deleted folder on Drive (404) raises distinct FolderGone error
+        # Trashed folder on Drive (GET returns 200 trashed=True, POST would return 200!) raises FolderGone
         state_mock["folders"][target_folder]["trashed"] = True
         try:
             gdrive.upload_mp4(cfg, small_clip, target_folder, "clip02.mp4")
-            check("upload_mp4 signals deleted Drive folder on 404", False)
+            check("upload_mp4 raises FolderGone when target folder is trashed=True", False)
         except gdrive.FolderGone:
-            check("upload_mp4 signals deleted Drive folder on 404", True)
+            check("upload_mp4 raises FolderGone when target folder is trashed=True", True)
 
-    # ---- 6. On-demand cache: local hit, Drive fetch, cache reuse, concurrency dedup, bad id, sweep_cache
+        # Permanently deleted folder on Drive (404) raises FolderGone
+        state_mock["folders"].pop(target_folder)
+        try:
+            gdrive.upload_mp4(cfg, small_clip, target_folder, "clip02.mp4")
+            check("upload_mp4 raises FolderGone when target folder returns 404", False)
+        except gdrive.FolderGone:
+            check("upload_mp4 raises FolderGone when target folder returns 404", True)
+
+    # ---- 7. On-demand streaming cache: local hit, concurrent stream dedup, truncation checks, ASCII did, sweep_cache locks
     job_doc = {"id": "job_up", "user": alice.id, "dir": str(DATA_DIR / "job_up")}
-    clip_local = {"id": "clip01", "file": "clip01.mp4", "drive": {"id": res["id"]}}
+    clip_local = {"id": "clip01", "file": "clip01.mp4", "drive": {"id": res["id"], "size": len(payload)}}
     state_mock["calls"].clear()
     got_local = gdrive.ensure_local(job_doc, clip_local)
     check("ensure_local returns SSD clip directly without touching Drive",
           (got_local == big_clip, len(state_mock["calls"])),
           (True, 0))
 
-    # Remove local SSD clip to simulate archived state; verify concurrent ensure_local downloads only once
+    # Remove local SSD clip to simulate archived state; verify concurrent ensure_local streams only once
     big_clip.unlink()
     state_mock["media_delay"] = 0.08
     results = []
@@ -444,10 +654,10 @@ try:
         t.join()
     state_mock["media_delay"] = 0.0
 
-    get_media_calls = [c for c in state_mock["calls"] if c[0] == "GET" and "alt=media" in c[1]]
+    stream_calls = [c for c in state_mock["calls"] if c[3] == "stream" and "alt=media" in c[1]]
     cached_path = config.TMP_DIR / "drive_cache" / f"{alice.id}_{res['id']}.mp4"
-    check("concurrent ensure_local downloads file once into drive_cache",
-          (len(get_media_calls), all(p == cached_path for p in results), cached_path.read_bytes() == payload),
+    check("concurrent ensure_local streams file once into drive_cache",
+          (len(stream_calls), all(p == cached_path for p in results), cached_path.read_bytes() == payload),
           (1, True, True))
 
     # Subsequent call hits drive_cache with 0 HTTP calls and refreshes mtime
@@ -459,54 +669,85 @@ try:
           (got_cached == cached_path, len(state_mock["calls"]), cached_path.stat().st_mtime > old_mtime + 600),
           (True, 0, True))
 
-    # Invalid Drive IDs and missing Drive files return None cleanly
-    check("invalid drive id rejected", gdrive.ensure_local(job_doc, {"id": "c", "drive": {"id": "../evil"}}), None)
+    # Truncated download (< drive.size or < Content-Length) is rejected and leaves no .tmp or partial .mp4
+    state_mock["files"]["drv_trunc_1"] = b"0123456789" * 100
+    state_mock["truncate_bytes"] = 250
+    trunc_clip = {"id": "ct", "drive": {"id": "drv_trunc_1", "size": 1000}}
+    check("ensure_local rejects truncated stream shorter than expected size",
+          gdrive.ensure_local(job_doc, trunc_clip),
+          None)
+    state_mock["truncate_bytes"] = None
+    state_mock["bad_content_length"] = 9999
+    check("ensure_local rejects mismatched Content-Length header",
+          gdrive.ensure_local(job_doc, {"id": "ct2", "drive": {"id": "drv_trunc_1"}}),
+          None)
+    state_mock["bad_content_length"] = None
+
+    # Invalid & non-ASCII Drive IDs and missing Drive files return None cleanly
+    check("path traversal drive id rejected", gdrive.ensure_local(job_doc, {"id": "c", "drive": {"id": "../evil"}}), None)
+    check("non-ASCII drive id rejected", gdrive.ensure_local(job_doc, {"id": "c", "drive": {"id": "drv_évil_1234"}}), None)
     check("missing remote file returns None", gdrive.ensure_local(job_doc, {"id": "c", "drive": {"id": "nonexistent_id"}}), None)
     check("no leftover .tmp files in drive_cache", list((config.TMP_DIR / "drive_cache").glob("*.tmp")), [])
 
-    # Streaming download path via httpx.stream
-    import contextlib as _contextlib
-    state_mock["files"]["drv_stream_99"] = b"STREAM_MP4_BYTES_" * 200
+    # sweep_cache respects held _key_lock on .mp4 and preserves active (<1800s) .tmp while deleting orphaned (>1800s) .tmp
+    cdir = config.TMP_DIR / "drive_cache"
+    locked_mp4 = cdir / f"{alice.id}_lockedclip.mp4"
+    locked_mp4.write_bytes(b"in-use")
+    expired_ts = time.time() - (gdrive.CACHE_TTL + 300)
+    os.utime(locked_mp4, (expired_ts, expired_ts))
 
-    class FakeStreamResp:
-        status_code = 200
-
-        def iter_bytes(self, _chunk_size=8192):
-            data = state_mock["files"]["drv_stream_99"]
-            yield data[:50]
-            yield data[50:]
-
-    @_contextlib.contextmanager
-    def fake_stream(method, url, headers=None, timeout=None, follow_redirects=None):
-        with mock_lock:
-            state_mock["calls"].append((method, url, None, "stream", headers or {}))
-        yield FakeStreamResp()
-
-    gdrive.httpx.stream = fake_stream
-    streamed = gdrive.ensure_local(job_doc, {"id": "clip_s", "drive": {"id": "drv_stream_99"}})
-    gdrive.httpx.stream = gdrive._ORIG_HTTPX_STREAM
-    check("ensure_local streams multi-chunk response to disk",
-          streamed is not None and streamed.read_bytes() == state_mock["files"]["drv_stream_99"],
-          True)
-
-    # sweep_cache removes expired files and keeps fresh ones
-    stale_cache = config.TMP_DIR / "drive_cache" / "stale_entry.mp4"
+    stale_cache = cdir / f"{bob.id}_stale_entry.mp4"
     stale_cache.write_bytes(b"old")
-    stale_ts = time.time() - (gdrive.CACHE_TTL + 120)
-    os.utime(stale_cache, (stale_ts, stale_ts))
-    gdrive.sweep_cache()
-    check("sweep_cache evicts expired files and keeps active cache",
-          (not stale_cache.exists(), cached_path.is_file()),
-          (True, True))
+    os.utime(stale_cache, (expired_ts, expired_ts))
 
-    # ---- 7. Disconnect preserves settings & archive totals while wiping credentials
+    young_tmp = cdir / "active_download.tmp"
+    young_tmp.write_bytes(b"downloading")
+    young_ts = time.time() - 120
+    os.utime(young_tmp, (young_ts, young_ts))
+
+    orphan_tmp = cdir / "crashed_download.tmp"
+    orphan_tmp.write_bytes(b"orphaned")
+    orphan_ts = time.time() - 4000
+    os.utime(orphan_tmp, (orphan_ts, orphan_ts))
+
+    held_lk = gdrive._key_lock(locked_mp4.stem)
+    held_lk.acquire()
+    try:
+        gdrive.sweep_cache(max_age=60)
+    finally:
+        held_lk.release()
+    check("sweep_cache skips locked .mp4 and young .tmp, evicts unlocked expired .mp4 and orphaned .tmp",
+          (locked_mp4.is_file(), young_tmp.is_file(), not stale_cache.exists(), not orphan_tmp.exists(), cached_path.is_file()),
+          (True, True, True, True, True))
+    young_tmp.unlink(missing_ok=True)
+
+    # ---- 8. Disconnect purges user's cached .mp4s; forget(uid) cleans _mem, _states, _inflight and drive_cache
+    bob_cache = cdir / f"{bob.id}_keepme.mp4"
+    bob_cache.write_bytes(b"bob-video")
     with ctx.as_user(alice.id):
         v_pre = ctx.version(alice.id)
         disc = gdrive.disconnect()
-        check("disconnect clears auth and keeps settings/totals",
+        check("disconnect clears auth, keeps settings/totals, and purges user's cached .mp4s",
               (disc["connected"], disc["email"], disc["auto_days"], disc["archived_count"],
-               gdrive.is_connected(), ctx.version(alice.id) > v_pre),
-              (False, "", 5, 4, False, True))
+               gdrive.is_connected(), ctx.version(alice.id) > v_pre,
+               not cached_path.exists(), not locked_mp4.exists(), bob_cache.is_file()),
+              (False, "", 5, 4, False, True, True, True, True))
+
+    # Populate state for bob and verify forget(bob.id)
+    with ctx.as_user(bob.id):
+        _ = gdrive._cfg()
+        _ = gdrive.connect_url()
+    gdrive._inflight.add((bob.id, "j1", "c1"))
+    gdrive._inflight.add((alice.id, "j2", "c2"))
+    gdrive.forget(bob.id)
+    check("forget(uid) clears _mem, _states, _inflight and drive_cache only for that user",
+          (bob.id not in gdrive._mem,
+           all(v[0] != bob.id for v in gdrive._states.values()),
+           (bob.id, "j1", "c1") not in gdrive._inflight,
+           (alice.id, "j2", "c2") in gdrive._inflight,
+           not bob_cache.exists()),
+          (True, True, True, True, True))
+    gdrive._inflight.clear()
 
     print("ALL PASSED" if not fails else f"{len(fails)} failed")
 finally:

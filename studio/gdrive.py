@@ -5,6 +5,7 @@ files and folders it creates itself (drive.file), organises clips under PeakCut 
 videos in 8 MB resumable pieces, checks that Google Drive recorded the exact byte size, and fetches archived clips back
 into a short-lived local cache whenever someone plays, downloads or re-posts them."""
 import json
+import math
 import os
 import re
 import secrets
@@ -20,6 +21,7 @@ from . import accounts, config, ctx
 SCOPES = "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.email"
 CHUNK = 8 * 1024 * 1024
 CACHE_TTL = 3600
+_MAX_STATES = 5000
 
 DEFAULTS = {
     "connected": False,
@@ -42,9 +44,6 @@ _inflight: set = set()      # (uid, jid, cid) items queued or uploading
 _cache_guard = threading.Lock()
 _cache_locks: dict = {}     # "{uid}_{did}" -> Lock
 
-_ORIG_HTTPX_GET = httpx.get
-_ORIG_HTTPX_STREAM = httpx.stream
-
 
 class FolderGone(RuntimeError):
     """Raised when a cached Google Drive folder was deleted or moved to Trash."""
@@ -56,11 +55,54 @@ def _file() -> Path:
     return d / "gdrive.json"
 
 
+def _nonneg_int(val) -> int:
+    if val is None or isinstance(val, bool):
+        return 0
+    try:
+        return max(0, int(val))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _copy_cfg(data: dict) -> dict:
-    out = {k: data.get(k, DEFAULTS[k]) for k in DEFAULTS}
-    raw_folders = data.get("folders")
-    out["folders"] = dict(raw_folders) if isinstance(raw_folders, dict) else {}
-    return out
+    src = data if isinstance(data, dict) else {}
+    raw_exp = src.get("expires")
+    try:
+        expires = float(raw_exp) if raw_exp is not None and not isinstance(raw_exp, bool) else 0.0
+        if not math.isfinite(expires):
+            expires = 0.0
+    except (TypeError, ValueError):
+        expires = 0.0
+
+    raw_days = src.get("auto_days", DEFAULTS["auto_days"])
+    if raw_days is None or isinstance(raw_days, bool):
+        auto_days = DEFAULTS["auto_days"]
+    else:
+        try:
+            auto_days = max(0, min(365, int(raw_days)))
+        except (TypeError, ValueError):
+            auto_days = DEFAULTS["auto_days"]
+
+    raw_folders = src.get("folders")
+    folders = (
+        {str(k): str(v) for k, v in raw_folders.items() if isinstance(k, str) and isinstance(v, str) and v}
+        if isinstance(raw_folders, dict)
+        else {}
+    )
+    raw_auto_post = src.get("auto_after_post")
+    return {
+        "connected": bool(src.get("connected", False)),
+        "email": str(src.get("email") or ""),
+        "refresh_token": str(src.get("refresh_token") or ""),
+        "access_token": str(src.get("access_token") or ""),
+        "expires": expires,
+        "auto_after_post": DEFAULTS["auto_after_post"] if raw_auto_post is None else bool(raw_auto_post),
+        "auto_days": auto_days,
+        "folders": folders,
+        "archived_bytes": _nonneg_int(src.get("archived_bytes")),
+        "archived_count": _nonneg_int(src.get("archived_count")),
+        "last_error": str(src.get("last_error") or ""),
+    }
 
 
 def _cfg() -> dict:
@@ -104,9 +146,85 @@ def forget_mem(uid: str):
         _mem.pop(uid, None)
 
 
-def _check(r, what: str):
+def _purge_user_cache(uid: str):
+    if not uid:
+        return
+    cdir = config.TMP_DIR / "drive_cache"
+    if not cdir.is_dir():
+        return
+    prefix = f"{uid}_"
+    for f in list(cdir.iterdir()):
+        if not f.is_file() or not f.name.startswith(prefix):
+            continue
+        if f.name.endswith(".mp4"):
+            lk = _key_lock(f.stem)
+            acquired = lk.acquire(blocking=False)
+            try:
+                f.unlink(missing_ok=True)
+            except OSError:
+                pass
+            finally:
+                if acquired:
+                    lk.release()
+        else:
+            try:
+                f.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def forget(uid: str):
+    """Remove all in-memory state, pending OAuth tokens, queue entries and cached clips for a deleted user."""
+    with _lock:
+        _mem.pop(uid, None)
+        for k in [k for k, v in list(_states.items()) if v[0] == uid]:
+            _states.pop(k, None)
+        for item in [it for it in list(_inflight) if it[0] == uid]:
+            _inflight.discard(item)
+    _purge_user_cache(uid)
+
+
+def _redact(text: str, cfg: dict | None = None) -> str:
+    out = str(text or "")
+    if not out:
+        return ""
+    secrets_to_hide = set()
+    if isinstance(cfg, dict):
+        for k in ("access_token", "refresh_token"):
+            v = cfg.get(k)
+            if isinstance(v, str) and v:
+                secrets_to_hide.add(v)
+    u = ctx.uid_or_none()
+    if u:
+        with _lock:
+            mem_c = _mem.get(u)
+            if isinstance(mem_c, dict):
+                for k in ("access_token", "refresh_token"):
+                    v = mem_c.get(k)
+                    if isinstance(v, str) and v:
+                        secrets_to_hide.add(v)
+    try:
+        _, g_secret = accounts.app_keys("google")
+        if g_secret:
+            secrets_to_hide.add(g_secret)
+    except Exception:  # noqa: BLE001
+        pass
+    for s in sorted(secrets_to_hide, key=len, reverse=True):
+        out = out.replace(s, "[redacted]")
+    out = re.sub(r"(?i)\bBearer\s+[^\s\"',;]+", "Bearer [redacted]", out)
+    out = re.sub(r"upload_id=[^\s&\"']+", "upload_id=[redacted]", out)
+    out = re.sub(
+        r'("?(?:access_token|refresh_token|client_secret)"?\s*[:=]\s*"?)[^"\s,&}]+',
+        r"\1[redacted]",
+        out,
+        flags=re.IGNORECASE,
+    )
+    return out
+
+
+def _check(r, what: str, cfg: dict | None = None):
     if r.status_code >= 400:
-        raise RuntimeError(f"{what} failed ({r.status_code}): {r.text[:300]}")
+        raise RuntimeError(f"{what} failed ({r.status_code}): {_redact((r.text or '')[:300], cfg)}")
     return r
 
 
@@ -129,10 +247,14 @@ def connect_url() -> str:
         raise ValueError("Connecting Google Drive isn't set up on this server yet.")
     cid, _ = accounts.app_keys("google")
     now = time.time()
-    state = secrets.token_urlsafe(16)
+    state = secrets.token_urlsafe(24)
     with _lock:
         for k in [k for k, v in list(_states.items()) if now - v[1] > 900]:
             _states.pop(k, None)
+        if len(_states) >= _MAX_STATES:
+            excess = len(_states) - (_MAX_STATES - 1)
+            for k, _ in sorted(_states.items(), key=lambda kv: kv[1][1])[:excess]:
+                _states.pop(k, None)
         _states[state] = (ctx.uid(), now)
     return "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode({
         "client_id": cid,
@@ -180,26 +302,31 @@ def connect_finish(code: str, state: str) -> dict:
         raise ValueError(
             "Google did not return a long-lived sign-in. Remove PeakCut's access in your Google account and connect again."
         )
+    if not tok.get("access_token"):
+        raise RuntimeError("Google did not return an access token.")
     about = _check(httpx.get(
         "https://www.googleapis.com/drive/v3/about",
         params={"fields": "storageQuota,user"},
         headers={"Authorization": f"Bearer {tok['access_token']}"},
         timeout=30,
-    ), "Reading Google Drive account").json()
+    ), "Reading Google Drive account", tok).json()
     email = str((about.get("user") or {}).get("emailAddress") or "").strip()
-    old = _cfg()
-    same_email = bool(email and old.get("email") == email)
-    cfg = {
-        **old,
-        "connected": True,
-        "email": email,
-        "refresh_token": tok["refresh_token"],
-        "access_token": tok["access_token"],
-        "expires": time.time() + float(tok.get("expires_in", 3600)) - 60,
-        "folders": dict(old.get("folders") or {}) if same_email else {},
-        "last_error": "",
-    }
-    _save(cfg)
+    with _lock:
+        old = _cfg()
+        same_email = bool(email and old.get("email") == email)
+        cfg = {
+            **old,
+            "connected": True,
+            "email": email,
+            "refresh_token": str(tok["refresh_token"]),
+            "access_token": str(tok["access_token"]),
+            "expires": time.time() + float(tok.get("expires_in", 3600)) - 60,
+            "folders": dict(old.get("folders") or {}) if same_email else {},
+            "last_error": "",
+        }
+        _save(cfg)
+    if not same_email:
+        _purge_user_cache(ctx.uid())
     ctx.bump()
     st = public_status(include_quota=False)
     st["quota"] = _parse_quota(about.get("storageQuota"))
@@ -207,17 +334,20 @@ def connect_finish(code: str, state: str) -> dict:
 
 
 def disconnect() -> dict:
-    cfg = _cfg()
-    cfg.update(
-        connected=False,
-        email="",
-        refresh_token="",
-        access_token="",
-        expires=0.0,
-        folders={},
-        last_error="",
-    )
-    _save(cfg)
+    u = ctx.uid()
+    with _lock:
+        cfg = _cfg()
+        cfg.update(
+            connected=False,
+            email="",
+            refresh_token="",
+            access_token="",
+            expires=0.0,
+            folders={},
+            last_error="",
+        )
+        _save(cfg)
+    _purge_user_cache(u)
     ctx.bump()
     return public_status(include_quota=False)
 
@@ -225,16 +355,20 @@ def disconnect() -> dict:
 def save_settings(patch: dict) -> dict:
     if not isinstance(patch, dict):
         raise ValueError("Invalid Google Drive settings.")
-    cfg = _cfg()
-    if "auto_after_post" in patch:
-        cfg["auto_after_post"] = bool(patch["auto_after_post"])
-    if "auto_days" in patch:
-        try:
-            days = int(patch["auto_days"])
-        except (TypeError, ValueError) as e:
-            raise ValueError("Choose a number of days between 0 and 365.") from e
-        cfg["auto_days"] = max(0, min(365, days))
-    _save(cfg)
+    with _lock:
+        cfg = _cfg()
+        if "auto_after_post" in patch:
+            cfg["auto_after_post"] = bool(patch["auto_after_post"])
+        if "auto_days" in patch:
+            raw_days = patch["auto_days"]
+            if isinstance(raw_days, bool):
+                raise ValueError("Choose a number of days between 0 and 365.")
+            try:
+                days = int(raw_days)
+            except (TypeError, ValueError) as e:
+                raise ValueError("Choose a number of days between 0 and 365.") from e
+            cfg["auto_days"] = max(0, min(365, days))
+        _save(cfg)
     ctx.bump()
     return public_status(include_quota=False)
 
@@ -252,13 +386,33 @@ def _token(cfg: dict) -> str:
         "client_secret": secret,
         "refresh_token": cfg["refresh_token"],
         "grant_type": "refresh_token",
-    }, timeout=30), "Refreshing Google Drive sign-in").json()
-    cfg["access_token"] = tok["access_token"]
-    if tok.get("refresh_token"):
-        cfg["refresh_token"] = tok["refresh_token"]
-    cfg["expires"] = time.time() + float(tok.get("expires_in", 3600)) - 60
+    }, timeout=30), "Refreshing Google Drive sign-in", cfg).json()
+    if not tok.get("access_token"):
+        raise RuntimeError("Google Drive token refresh did not return an access token.")
+    new_access = str(tok["access_token"])
+    new_refresh = str(tok["refresh_token"]) if tok.get("refresh_token") else ""
+    new_expires = time.time() + float(tok.get("expires_in", 3600)) - 60
+
     if ctx.uid_or_none():
-        _save(cfg)
+        with _lock:
+            live = _cfg()
+            if not (live.get("connected") and live.get("refresh_token")):
+                raise RuntimeError("Google Drive was disconnected.")
+            live["access_token"] = new_access
+            if new_refresh:
+                live["refresh_token"] = new_refresh
+            live["expires"] = new_expires
+            _save(live)
+            cfg.clear()
+            cfg.update(_copy_cfg(live))
+        return cfg["access_token"]
+
+    if not (cfg.get("connected") and cfg.get("refresh_token")):
+        raise RuntimeError("Google Drive was disconnected.")
+    cfg["access_token"] = new_access
+    if new_refresh:
+        cfg["refresh_token"] = new_refresh
+    cfg["expires"] = new_expires
     return cfg["access_token"]
 
 
@@ -301,7 +455,7 @@ def public_status(include_quota: bool = True) -> dict:
         "auto_days": int(cfg.get("auto_days", 3)),
         "archived_bytes": int(cfg.get("archived_bytes", 0)),
         "archived_count": int(cfg.get("archived_count", 0)),
-        "last_error": str(cfg.get("last_error", "")),
+        "last_error": _redact(str(cfg.get("last_error") or ""), cfg),
         "quota": quota(cfg) if (include_quota and conn) else None,
         "queued": queued_for_me(),
     }
@@ -312,14 +466,36 @@ def drop_folder_cache(cfg: dict):
     """Clear cached Drive folder IDs when a folder was deleted or moved."""
     cfg["folders"] = {}
     if ctx.uid_or_none():
-        _save(cfg)
+        with _lock:
+            live = _cfg()
+            if live.get("connected") and live.get("email") == cfg.get("email"):
+                live["folders"] = {}
+                _save(live)
+                cfg.clear()
+                cfg.update(_copy_cfg(live))
 
 
 def _esc_q(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "\\'")
 
 
-def _find_or_create_folder(token: str, name: str, parent: str | None) -> str:
+def _assert_folder_alive(token: str, folder_id: str, cfg: dict | None = None):
+    r = httpx.get(
+        f"https://www.googleapis.com/drive/v3/files/{folder_id}",
+        params={"fields": "id,trashed"},
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=30,
+    )
+    if r.status_code == 404:
+        raise FolderGone("The Google Drive folder no longer exists.")
+    meta = _check(r, "Checking Google Drive folder", cfg).json()
+    if not isinstance(meta, dict) or not meta.get("id") or meta.get("trashed"):
+        raise FolderGone("The Google Drive folder was moved to Trash.")
+
+
+def _find_or_create_folder(token: str, name: str, parent: str | None, cfg: dict | None = None) -> str:
+    if parent:
+        _assert_folder_alive(token, parent, cfg)
     parent_ref = parent if parent else "root"
     q = (
         "mimeType='application/vnd.google-apps.folder' and trashed=false "
@@ -334,7 +510,7 @@ def _find_or_create_folder(token: str, name: str, parent: str | None) -> str:
     )
     if search.status_code == 404:
         raise FolderGone("Cached parent folder no longer exists on Google Drive.")
-    files = _check(search, f"Searching Google Drive folder '{name}'").json().get("files") or []
+    files = _check(search, f"Searching Google Drive folder '{name}'", cfg).json().get("files") or []
     if files and files[0].get("id"):
         return str(files[0]["id"])
 
@@ -343,14 +519,17 @@ def _find_or_create_folder(token: str, name: str, parent: str | None) -> str:
         body["parents"] = [parent]
     create = httpx.post(
         "https://www.googleapis.com/drive/v3/files",
-        params={"fields": "id"},
+        params={"fields": "id,trashed"},
         json=body,
         headers=auth_hdr,
         timeout=30,
     )
     if create.status_code == 404:
         raise FolderGone("Cached parent folder no longer exists on Google Drive.")
-    fid = _check(create, f"Creating Google Drive folder '{name}'").json().get("id")
+    created = _check(create, f"Creating Google Drive folder '{name}'", cfg).json()
+    if created.get("trashed"):
+        raise FolderGone("Google Drive folder is inside Trash.")
+    fid = created.get("id")
     if not fid:
         raise RuntimeError(f"Google Drive did not return an ID for folder '{name}'.")
     return str(fid)
@@ -367,26 +546,36 @@ def folder_for(cfg: dict, creator_name: str = "", ts: float = None) -> str:
         return folders[m_key]
 
     token = _token(cfg)
+    folders = cfg.setdefault("folders", {})
     for attempt in range(2):
         try:
             changed = False
+            made = {}
             root_id = folders.get("root")
             if not root_id:
-                root_id = _find_or_create_folder(token, "PeakCut", None)
-                folders["root"] = root_id
+                root_id = _find_or_create_folder(token, "PeakCut", None, cfg)
+                folders["root"] = made["root"] = root_id
                 changed = True
             creator_id = folders.get(c_key)
             if not creator_id:
-                creator_id = _find_or_create_folder(token, creator, root_id)
-                folders[c_key] = creator_id
+                creator_id = _find_or_create_folder(token, creator, root_id, cfg)
+                folders[c_key] = made[c_key] = creator_id
                 changed = True
             month_id = folders.get(m_key)
             if not month_id:
-                month_id = _find_or_create_folder(token, month, creator_id)
-                folders[m_key] = month_id
+                month_id = _find_or_create_folder(token, month, creator_id, cfg)
+                folders[m_key] = made[m_key] = month_id
                 changed = True
             if changed and ctx.uid_or_none():
-                _save(cfg)
+                with _lock:
+                    live = _cfg()
+                    if live.get("connected") and live.get("email") == cfg.get("email"):
+                        merged = dict(live.get("folders") or {})
+                        merged.update(made)
+                        live["folders"] = merged
+                        _save(live)
+                        cfg.clear()
+                        cfg.update(_copy_cfg(live))
             return month_id
         except FolderGone:
             if attempt == 0:
@@ -411,6 +600,7 @@ def upload_mp4(cfg: dict, path: Path, folder_id: str, remote_name: str) -> dict:
         raise ValueError("Clip file is empty.")
 
     token = _token(cfg)
+    _assert_folder_alive(token, folder_id, cfg)
     name = (remote_name or path.name).strip()[:180] or path.name[:180]
     start = httpx.post(
         "https://www.googleapis.com/upload/drive/v3/files",
@@ -425,7 +615,7 @@ def upload_mp4(cfg: dict, path: Path, folder_id: str, remote_name: str) -> dict:
     )
     if start.status_code == 404:
         raise FolderGone("The target Google Drive folder no longer exists.")
-    _check(start, "Starting Google Drive upload")
+    _check(start, "Starting Google Drive upload", cfg)
     upload_url = start.headers.get("Location") or start.headers.get("location")
     if not upload_url:
         raise RuntimeError("Google Drive did not return a resumable upload URL.")
@@ -451,10 +641,12 @@ def upload_mp4(cfg: dict, path: Path, folder_id: str, remote_name: str) -> dict:
             offset = last + 1
             if offset < size:
                 if r.status_code != 308:
-                    raise RuntimeError(f"Google Drive chunk upload failed ({r.status_code}): {r.text[:300]}")
+                    detail = _redact((r.text or "")[:300], cfg)
+                    raise RuntimeError(f"Google Drive chunk upload failed ({r.status_code}): {detail}")
             else:
                 if r.status_code not in (200, 201):
-                    raise RuntimeError(f"Google Drive upload failed ({r.status_code}): {r.text[:300]}")
+                    detail = _redact((r.text or "")[:300], cfg)
+                    raise RuntimeError(f"Google Drive upload failed ({r.status_code}): {detail}")
 
     try:
         done = r.json() if r is not None else {}
@@ -505,9 +697,32 @@ def sweep_cache(max_age: int = CACHE_TTL) -> int:
     if not cdir.is_dir():
         return 0
     now = time.time()
+    tmp_cutoff = max(max_age, 1800)
     removed = 0
     for f in list(cdir.iterdir()):
         if not f.is_file():
+            continue
+        name = f.name
+        if name.endswith(".tmp"):
+            try:
+                if now - f.stat().st_mtime > tmp_cutoff:
+                    f.unlink(missing_ok=True)
+                    removed += 1
+            except OSError:
+                pass
+            continue
+        if name.endswith(".mp4"):
+            lk = _key_lock(f.stem)
+            if not lk.acquire(blocking=False):
+                continue
+            try:
+                if f.is_file() and now - f.stat().st_mtime > max_age:
+                    f.unlink(missing_ok=True)
+                    removed += 1
+            except OSError:
+                pass
+            finally:
+                lk.release()
             continue
         try:
             if now - f.stat().st_mtime > max_age:
@@ -519,7 +734,7 @@ def sweep_cache(max_age: int = CACHE_TTL) -> int:
 
 
 def ensure_local(job: dict, clip: dict) -> Path | None:
-    """Return the clip's local .mp4 if still on SSD, otherwise fetch it from Google Drive into drive_cache."""
+    """Return the clip's local .mp4 if still on SSD, otherwise stream it from Google Drive into drive_cache."""
     if not isinstance(job, dict) or not isinstance(clip, dict):
         return None
     if clip.get("file") and job.get("dir"):
@@ -527,10 +742,18 @@ def ensure_local(job: dict, clip: dict) -> Path | None:
         if local.is_file():
             return local
 
-    did = (clip.get("drive") or {}).get("id")
-    if not did or not re.fullmatch(r"[\w\-]{4,120}", str(did)):
+    drive_meta = clip.get("drive") if isinstance(clip.get("drive"), dict) else {}
+    did = drive_meta.get("id")
+    if not did or not re.fullmatch(r"[A-Za-z0-9_\-]{4,120}", str(did)):
         return None
     did = str(did)
+    try:
+        expected_size = int(drive_meta.get("size") or 0)
+    except (TypeError, ValueError):
+        return None
+    if expected_size < 0:
+        return None
+
     uid = job.get("user") or ctx.uid_or_none()
     if not uid or not re.fullmatch(r"[A-Za-z0-9_]{6,40}", str(uid)):
         return None
@@ -540,9 +763,11 @@ def ensure_local(job: dict, clip: dict) -> Path | None:
     dest = cdir / f"{key}.mp4"
     with _key_lock(key):
         try:
-            if dest.is_file() and dest.stat().st_size > 0:
-                os.utime(dest, None)
-                return dest
+            if dest.is_file():
+                cur_size = dest.stat().st_size
+                if cur_size > 0 and (expected_size == 0 or cur_size == expected_size):
+                    os.utime(dest, None)
+                    return dest
         except OSError:
             pass
 
@@ -556,30 +781,35 @@ def ensure_local(job: dict, clip: dict) -> Path | None:
             url = f"https://www.googleapis.com/drive/v3/files/{did}?alt=media"
             headers = {"Authorization": f"Bearer {token}"}
             wrote = 0
-            use_stream = (
-                getattr(httpx, "stream", None) is not _ORIG_HTTPX_STREAM
-                or (getattr(httpx, "get", None) is _ORIG_HTTPX_GET and hasattr(httpx, "stream"))
-            )
-            if use_stream:
-                with httpx.stream("GET", url, headers=headers, timeout=600, follow_redirects=True) as r:
-                    if r.status_code != 200:
-                        return None
-                    with tmp.open("wb") as out:
-                        for chunk in r.iter_bytes(CHUNK):
-                            if chunk:
-                                out.write(chunk)
-                                wrote += len(chunk)
-            else:
-                r = httpx.get(url, headers=headers, timeout=600)
+            header_size = None
+            with httpx.stream("GET", url, headers=headers, timeout=600, follow_redirects=True) as r:
                 if r.status_code != 200:
                     return None
-                body = getattr(r, "content", b"") or b""
-                if not body:
-                    return None
-                tmp.write_bytes(body)
-                wrote = len(body)
+                hdrs = getattr(r, "headers", None) or {}
+                cl_raw = hdrs.get("Content-Length") or hdrs.get("content-length")
+                if cl_raw is not None and str(cl_raw).strip() != "":
+                    try:
+                        header_size = int(str(cl_raw).strip())
+                    except ValueError:
+                        return None
+                    if header_size <= 0 or (expected_size > 0 and header_size != expected_size):
+                        return None
+                with tmp.open("wb") as out:
+                    for chunk in r.iter_bytes(CHUNK):
+                        if chunk:
+                            out.write(chunk)
+                            wrote += len(chunk)
 
-            if wrote <= 0 or not tmp.is_file() or tmp.stat().st_size <= 0:
+            if wrote <= 0:
+                tmp.unlink(missing_ok=True)
+                return None
+            if expected_size > 0 and wrote != expected_size:
+                tmp.unlink(missing_ok=True)
+                return None
+            if header_size is not None and wrote != header_size:
+                tmp.unlink(missing_ok=True)
+                return None
+            if not tmp.is_file() or tmp.stat().st_size != wrote:
                 tmp.unlink(missing_ok=True)
                 return None
             tmp.replace(dest)
