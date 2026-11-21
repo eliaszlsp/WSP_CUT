@@ -466,7 +466,8 @@ function GradientASCII(host, {
   intro = true,
   lightMode = false,
   fontFamily = DEFAULT_FONT,
-  dpr
+  dpr,
+  fps = 24
 } = {}) {
   const container = document.createElement('div');
   container.className = 'gradient-ascii-container';
@@ -496,7 +497,8 @@ function GradientASCII(host, {
     intro,
     lightMode,
     fontFamily: fontFamily || DEFAULT_FONT,
-    dpr
+    dpr: dpr ?? Math.min(window.devicePixelRatio || 1, 1.25),
+    fps: clamp(fps, 10, 60)
   };
   const settingsRef = { current: settings };
 
@@ -746,7 +748,12 @@ function GradientASCII(host, {
       raf = 0;
       if (disposed || !visible || document.hidden) return;
       const s = settingsRef.current;
-      const dt = last ? clamp((now - last) / 1000, 0.001, 0.05) : 1 / 60;
+      const minStep = 1000 / (s.fps || 24);
+      if (last && now - last < minStep - 2) {
+        raf = requestAnimationFrame(frame);
+        return;
+      }
+      const dt = last ? clamp((now - last) / 1000, 0.001, 0.1) : 1 / 24;
       last = now;
       if (!reduce) {
         time += dt * s.speed * 0.5;

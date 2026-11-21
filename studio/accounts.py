@@ -56,7 +56,8 @@ PLATFORM_PREF_DEFAULTS = {
     },
 }
 SETTING_DEFAULTS = {"discord_webhook": "", "telegram_token": "", "telegram_chat": "", "paused": False,
-                    "paused_platforms": [], "platform_prefs": {}, "digest_hour": 8, "last_digest": "", "tour_done": False}
+                    "paused_platforms": [], "platform_prefs": {}, "digest_hour": 8, "last_digest": "", "tour_done": False,
+                    "cover_enabled": False, "cover_first_frame": True}
 
 YT_SCOPES = "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly"
 IG = "https://graph.instagram.com"
@@ -352,7 +353,7 @@ def save_settings(patch: dict) -> dict:
         for k, v in patch.items():
             if k not in SETTING_DEFAULTS:
                 continue
-            if k in ("paused", "tour_done"):
+            if k in ("paused", "tour_done", "cover_enabled", "cover_first_frame"):
                 v = bool(v)
             elif k == "paused_platforms":
                 raw = v.split(",") if isinstance(v, str) else (list(v) if isinstance(v, (list, tuple, set)) else [])
@@ -705,7 +706,7 @@ def _tt_chunks(size: int) -> tuple:
     return 10_000_000, size // 10_000_000
 
 
-def tiktok_upload(acc, path: Path, caption: str, privacy: str = "public"):
+def tiktok_upload(acc, path: Path, caption: str, privacy: str = "public", cover_timestamp_ms: int = 1000):
     info = _tiktok_creator(acc)
     options = info.get("privacy_level_options") or ["SELF_ONLY"]
     level = next((p for p in TT_PRIVACY.get(privacy, ["SELF_ONLY"]) if p in options), "SELF_ONLY" if "SELF_ONLY" in options else options[0])
@@ -715,7 +716,7 @@ def tiktok_upload(acc, path: Path, caption: str, privacy: str = "public"):
     def init(lv):
         return _tt_post(acc, "/post/publish/video/init/", {
             "post_info": {"title": caption[:2200], "privacy_level": lv, "disable_duet": False, "disable_comment": False,
-                          "disable_stitch": False, "video_cover_timestamp_ms": 1000},
+                          "disable_stitch": False, "video_cover_timestamp_ms": max(0, int(cover_timestamp_ms))},
             "source_info": {"source": "FILE_UPLOAD", "video_size": size, "chunk_size": chunk, "total_chunk_count": count}},
             "Starting the TikTok post")
 

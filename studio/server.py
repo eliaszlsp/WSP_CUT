@@ -21,8 +21,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 
 from . import admin as admins
 from . import account, load
-from . import (accounts, ai, alerts, auth, brain, config, creators, ctx, db, gdrive, jobs, live, media, posting,
-               profiles, render, safe, transcribe, usage)
+from . import (accounts, ai, alerts, auth, brain, config, covers, creators, ctx, db, gdrive, jobs, live, media, posting,
+               profiles, remote, render, safe, transcribe, usage)
 
 from . import tools as _tools  # noqa: E402
 
@@ -576,7 +576,7 @@ def status(request: Request):
     from . import updates
     me_ = _me(request)
     return {"user": auth.public(me_), "update": updates.latest() if me_.is_admin else None, "accounts": config.ACCOUNTS, "disk_full": load.disk_full(), "no_ffmpeg": bool(_tools.missing()), "links": {"repo": config.REPO_URL, "follow": config.FOLLOW_URL}, "ai": usage.brief(), "unread": notices.unread(),
-            "tour": not accounts.settings()["tour_done"],
+            "tour": not accounts.settings()["tour_done"], "cover": covers.status(None),
             "youtube": accounts.youtube_ready(), "connect": {p: accounts.can_connect(p) for p in accounts.PLATFORM_NAMES},
             "gdrive": {"ready": gdrive.can_connect(), "connected": gdrive.is_connected(), "queued": gdrive.queued_for_me()},
             "max_upload_mb": config.MAX_UPLOAD_MB, "upload_part_mb": config.UPLOAD_PART_MB, "max_batch": config.MAX_ACTIVE_JOBS_PER_USER,
@@ -648,7 +648,7 @@ def _creator_rows():
         if profiles.needs_refresh(c):
             profiles.refresh(c["id"])
         s = live.active_for(c["id"])
-        out.append({**c, "live_job": s.job["id"] if s else None, "log": creators.read_log(c["id"], 30)})
+        out.append({**c, "live_job": s.job["id"] if s else None, "log": creators.read_log(c["id"], 30), "cover": covers.status(c["id"])})
     return out
 
 
@@ -1456,6 +1456,12 @@ def public_clip(token: str, ext: str):
     if not name.endswith(f".{ext}"):
         raise HTTPException(404)
     with ctx.as_user(uid):
+        if ext == "jpg" and name.startswith("_dc_"):
+            cid_ref = name[4:-4]
+            f = covers._global_cover_path(False) if cid_ref == "global" else covers._creator_cover_path(cid_ref, False)
+            if not f.is_file():
+                raise HTTPException(404)
+            return FileResponse(f, media_type="image/jpeg", headers={"Cache-Control": "private, no-store"})
         job = jobs.get(job_id) if re.fullmatch(r"[\w\-]{8,60}", job_id) else None
         f = Path(job["dir"]) / "clips" / name if job else None
         if ext == "mp4" and job and (not f or not f.is_file()):
@@ -1615,6 +1621,99 @@ def test_alert():
     if problems:
         raise HTTPException(400, "; ".join(problems))
     return {"ok": True}
+
+
+# ================================================================ profile covers (manual upload & AI)
+@app.get("/api/cover")
+def global_cover_file(w: int = 0, download: int = 0):
+    p = covers._global_cover_path(wide=bool(w))
+    if not p.is_file() and w:
+        p = covers._global_cover_path(wide=False)
+    if not p.is_file():
+        raise HTTPException(404)
+    return FileResponse(p, media_type="image/jpeg", filename="vicecut-capa-padrao.jpg" if download else None,
+                        headers={"Cache-Control": "private, max-age=300"})
+
+
+@app.post("/api/cover/upload")
+def global_cover_upload(file: UploadFile = File(...)):
+    _throttle("covup:" + ctx.uid(), 30, 600)
+    raw = file.file.read(covers.MAX_UPLOAD_BYTES + 1)
+    try:
+        return covers.save_uploaded_cover(raw, None)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/cover/generate")
+def global_cover_generate(body: dict = Body(default={})):
+    _throttle("covai:" + ctx.uid(), 20, 600)
+    try:
+        return covers.generate_ai_cover(str((body or {}).get("prompt") or ""), None)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/cover")
+def global_cover_delete():
+    return covers.delete_cover(None)
+
+
+@app.get("/api/creators/{cid}/cover")
+def creator_cover_file(cid: str, w: int = 0, download: int = 0):
+    if not creators.get(cid):
+        raise HTTPException(404)
+    p = covers._creator_cover_path(cid, wide=bool(w))
+    if not p.is_file() and w:
+        p = covers._creator_cover_path(cid, wide=False)
+    if not p.is_file():
+        raise HTTPException(404)
+    return FileResponse(p, media_type="image/jpeg", filename=f"{cid}-capa.jpg" if download else None,
+                        headers={"Cache-Control": "private, max-age=300"})
+
+
+@app.post("/api/creators/{cid}/cover/upload")
+def creator_cover_upload(cid: str, file: UploadFile = File(...)):
+    _throttle("covup:" + ctx.uid(), 30, 600)
+    raw = file.file.read(covers.MAX_UPLOAD_BYTES + 1)
+    try:
+        return covers.save_uploaded_cover(raw, cid)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/creators/{cid}/cover/generate")
+def creator_cover_generate(cid: str, body: dict = Body(default={})):
+    _throttle("covai:" + ctx.uid(), 20, 600)
+    try:
+        return covers.generate_ai_cover(str((body or {}).get("prompt") or ""), cid)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/creators/{cid}/cover")
+def creator_cover_delete(cid: str):
+    try:
+        return covers.delete_cover(cid)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+# ================================================================ remote mobile access & QR code
+@app.get("/api/remote")
+def remote_info(mode: str = "auto"):
+    return remote.info(mode=mode if mode in ("auto", "lan", "local") else "auto")
+
+
+@app.post("/api/remote/tunnel")
+def remote_start_tunnel(request: Request):
+    _admin(request)
+    _throttle("tunnel:" + ctx.uid(), 10, 600)
+    try:
+        remote.start_tunnel()
+    except RuntimeError as e:
+        raise HTTPException(500, str(e))
+    return remote.info("auto")
 
 
 # ================================================================ admin (only accounts marked as admin in the database)

@@ -314,7 +314,8 @@ def _thumb_for_long(out_dir: Path, name: str, clip: dict, peak_t: float, src_w: 
     )
 
 
-def render_compilation(src: Path, out_dir: Path, name: str, clip: dict, src_w: int, src_h: int) -> dict:
+def render_compilation(src: Path, out_dir: Path, name: str, clip: dict, src_w: int, src_h: int,
+                       default_cover: Path | None = None) -> dict:
     """Concatenate multiple highlight segments into a single 1920x1080 16:9 MP4 normalized to -14 LUFS."""
     segments = clip.get("segments") or []
     if not segments:
@@ -356,17 +357,20 @@ def render_compilation(src: Path, out_dir: Path, name: str, clip: dict, src_w: i
             f = work / f"{name}.{ext}"
             if f.exists():
                 shutil.move(str(f), str(out_dir / f"{name}.{ext}"))
-        _thumb_for_long(out_dir, name, clip, cover_t, src_w, src_h, out_w=1920, out_h=1080)
+        if default_cover and Path(default_cover).is_file():
+            shutil.copyfile(str(default_cover), str(out_dir / f"{name}.jpg"))
+        else:
+            _thumb_for_long(out_dir, name, clip, cover_t, src_w, src_h, out_w=1920, out_h=1080)
         return {"file": f"{name}.mp4", "cover": f"{name}.jpg", "layout": "horizontal"}
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
 
 def render_clip(src: Path, out_dir: Path, name: str, clip: dict, words: list, src_w: int, src_h: int,
-                aspect: str | None = None) -> dict:
+                aspect: str | None = None, default_cover: Path | None = None, cover_first_frame: bool = False) -> dict:
     """Writes <name>.mp4, <name>.jpg and <name>.ass into out_dir. Returns file names."""
     if clip.get("segments"):
-        return render_compilation(src, out_dir, name, clip, src_w, src_h)
+        return render_compilation(src, out_dir, name, clip, src_w, src_h, default_cover=default_cover)
     out_dir.mkdir(parents=True, exist_ok=True)
     start, end = clip["start"], clip["end"]
     is_16_9 = aspect == "16:9" or clip.get("format") == "16:9"
@@ -393,43 +397,66 @@ def render_clip(src: Path, out_dir: Path, name: str, clip: dict, words: list, sr
         tbase.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="pk", dir=str(tbase) if tbase else None))
     try:
-        res = _render_in(work, src, out_dir, name, start, end, layout, fg_h, ass, face=face, peak_t=clip.get("peak_t"))
+        res = _render_in(work, src, out_dir, name, start, end, layout, fg_h, ass, face=face, peak_t=clip.get("peak_t"),
+                         default_cover=default_cover, cover_first_frame=bool(cover_first_frame and not is_16_9))
         if is_16_9 or clip.get("clip_kind") == "long":
-            pt = clip.get("peak_t")
-            if pt is not None and start <= float(pt) <= end:
-                local_peak_t = max(0.0, min(max(0.0, (end - start) - 0.1), float(pt) - start))
+            if default_cover and Path(default_cover).is_file():
+                shutil.copyfile(str(default_cover), str(out_dir / f"{name}.jpg"))
             else:
-                local_peak_t = min(max(3.0, (end - start) * 0.35), (end - start) / 2)
-            out_w, out_h = (1920, 1080) if fg_h >= 1080 else (1280, 720)
-            _thumb_for_long(out_dir, name, clip, local_peak_t, src_w, src_h, out_w=out_w, out_h=out_h)
+                pt = clip.get("peak_t")
+                if pt is not None and start <= float(pt) <= end:
+                    local_peak_t = max(0.0, min(max(0.0, (end - start) - 0.1), float(pt) - start))
+                else:
+                    local_peak_t = min(max(3.0, (end - start) * 0.35), (end - start) / 2)
+                out_w, out_h = (1920, 1080) if fg_h >= 1080 else (1280, 720)
+                _thumb_for_long(out_dir, name, clip, local_peak_t, src_w, src_h, out_w=out_w, out_h=out_h)
         return res
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
 
 def _render_in(work: Path, src: Path, out_dir: Path, name: str, start, end, layout, fg_h, ass: str,
-               face=None, peak_t=None) -> dict:
+               face=None, peak_t=None, default_cover: Path | None = None, cover_first_frame: bool = False) -> dict:
     if ass:
         (work / f"{name}.ass").write_text(ass, encoding="utf-8")
         (work / "f").mkdir()
         for f in config.FONTS_DIR.glob("*.ttf"):
             shutil.copyfile(f, work / "f" / f.name)
-        fc = _filter(layout, fg_h, face) + f"[v0]ass={name}.ass:fontsdir=f[v]"
+        fc = _filter(layout, fg_h, face) + f"[v0]ass={name}.ass:fontsdir=f[vm]"
     else:
-        fc = _filter(layout, fg_h, face) + "[v0]null[v]"
+        fc = _filter(layout, fg_h, face) + "[v0]null[vm]"
     enc_timeout = max(RENDER_SECONDS, int((end - start) * 2.5))
-    base = ["ffmpeg", "-y", "-v", "error", "-ss", f"{start:.2f}", "-t", f"{end - start:.2f}", "-i", str(src),
-            "-filter_complex", fc, "-map", "[v]", "-map", "0:a:0", "-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
-            "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-movflags", "+faststart", "-pix_fmt"]
-    _encode_cmd(work, base, f"{name}.mp4", enc_timeout)
-    if peak_t is not None and start <= float(peak_t) <= end:
-        cover_t = max(0.0, min(max(0.0, (end - start) - 0.1), float(peak_t) - start))
+    has_dc = bool(default_cover and Path(default_cover).is_file())
+    if has_dc and cover_first_frame:
+        shutil.copyfile(str(default_cover), str(work / "cover_ff.jpg"))
+        fc_full = (
+            fc + ";"
+            f"[1:v]fps={config.OUT_FPS},scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1[vc];"
+            "[2:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[ac];"
+            "[0:a:0]loudnorm=I=-14:TP=-1.5:LRA=11,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[am];"
+            "[vc][ac][vm][am]concat=n=2:v=1:a=1[v][a]"
+        )
+        base = ["ffmpeg", "-y", "-v", "error", "-ss", f"{start:.2f}", "-t", f"{end - start:.2f}", "-i", str(src),
+                "-loop", "1", "-framerate", str(config.OUT_FPS), "-t", "0.12", "-i", "cover_ff.jpg",
+                "-f", "lavfi", "-t", "0.12", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+                "-filter_complex", fc_full, "-map", "[v]", "-map", "[a]",
+                "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-movflags", "+faststart", "-pix_fmt"]
     else:
-        cover_t = min(max(3.0, (end - start) * 0.35), (end - start) / 2) if layout == "horizontal" else min(1.2, (end - start) / 2)
-    run(["ffmpeg", "-y", "-v", "error", "-ss", f"{cover_t:.2f}", "-i", f"{name}.mp4", "-frames:v", "1",
-         "-q:v", "3", f"{name}.jpg"], cwd=work)
+        base = ["ffmpeg", "-y", "-v", "error", "-ss", f"{start:.2f}", "-t", f"{end - start:.2f}", "-i", str(src),
+                "-filter_complex", fc, "-map", "[vm]", "-map", "0:a:0", "-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
+                "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-movflags", "+faststart", "-pix_fmt"]
+    _encode_cmd(work, base, f"{name}.mp4", enc_timeout)
+    if has_dc:
+        shutil.copyfile(str(default_cover), str(work / f"{name}.jpg"))
+    else:
+        if peak_t is not None and start <= float(peak_t) <= end:
+            cover_t = max(0.0, min(max(0.0, (end - start) - 0.1), float(peak_t) - start))
+        else:
+            cover_t = min(max(3.0, (end - start) * 0.35), (end - start) / 2) if layout == "horizontal" else min(1.2, (end - start) / 2)
+        run(["ffmpeg", "-y", "-v", "error", "-ss", f"{cover_t:.2f}", "-i", f"{name}.mp4", "-frames:v", "1",
+             "-q:v", "3", f"{name}.jpg"], cwd=work)
     for ext in ("mp4", "jpg", "ass"):
         f = work / f"{name}.{ext}"
         if f.exists():
             shutil.move(str(f), str(out_dir / f"{name}.{ext}"))
-    return {"file": f"{name}.mp4", "cover": f"{name}.jpg", "layout": layout}
+    return {"file": f"{name}.mp4", "cover": f"{name}.jpg", "layout": layout, "has_default_cover": has_dc}

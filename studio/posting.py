@@ -471,16 +471,27 @@ def _post(p):
         if not is_short and clip.get("has_music"):
             raise RuntimeError("Vídeo longo bloqueado: contém música (>5s); permitido apenas em Shorts/Reels.")
         if plat == "youtube":
+            from . import covers
+            cov_def = covers.cover_file(job.get("creator"), wide=not is_short)
             yt_desc = (cap + "\n\n#Shorts") if is_short else cap
-            thumb_path = (Path(job["dir"]) / "clips" / Path(str(clip.get("cover") or "")).name) if (not is_short and clip.get("cover")) else None
+            thumb_path = cov_def or ((Path(job["dir"]) / "clips" / Path(str(clip.get("cover") or "")).name) if (not is_short and clip.get("cover")) else None)
             rid, url = accounts.youtube_upload(acc, path, title, yt_desc, _caption_tags(clip, plat)[:15], privacy,
                                                is_short=is_short, thumb_path=thumb_path)
         elif plat == "instagram":
-            cov_name = Path(str(clip.get("cover") or "")).name if clip.get("cover") else ""
+            from . import covers
+            cov_def = covers.cover_file(job.get("creator"), wide=False)
+            if cov_def:
+                cov_name = f"_dc_{job['creator']}.jpg" if job.get("creator") else "_dc_global.jpg"
+            else:
+                cov_name = Path(str(clip.get("cover") or "")).name if clip.get("cover") else ""
             rid, url = accounts.instagram_upload(acc, path, f"{title}\n\n{cap}", job["id"] if fname else "",
                                                  clip_name=fname, cover_name=cov_name)
         elif plat == "tiktok":
-            rid, url = accounts.tiktok_upload(acc, path, f"{title}\n\n{cap}", privacy)
+            from . import covers
+            cov_def = covers.cover_file(job.get("creator"), wide=False)
+            ts_ms = 0 if (cov_def or clip.get("has_default_cover")) else 1000
+            tt_kw = {"cover_timestamp_ms": ts_ms} if ts_ms != 1000 else {}
+            rid, url = accounts.tiktok_upload(acc, path, f"{title}\n\n{cap}", privacy, **tt_kw)
         else:
             raise RuntimeError("That kind of account is no longer supported.")
         p.update(status="posted", posted_at=time.time(), remote_id=rid, url=url, error=None)
@@ -667,10 +678,26 @@ def overview() -> dict:
     names = {c["id"]: c["name"] for c in all_cs}
     creator_map = {c["id"]: c for c in all_cs}
     clip_meta = {(j["id"], k["id"]): (j, k) for j in all_js for k in j.get("clips", [])}
+    from . import covers
     queue = sorted((p for p in _posts if p.get("status") in OPEN), key=lambda p: p.get("due_at", 0))
+    queued_by_platform = {"youtube": 0, "instagram": 0, "tiktok": 0}
+    for qp in queue:
+        pl = qp.get("platform") or ""
+        if pl in queued_by_platform:
+            queued_by_platform[pl] += 1
     done = sorted((p for p in _posts if p.get("status") in ("posted", "failed")), key=lambda p: -(p.get("posted_at") or p.get("due_at") or 0))[:40]
+    default_covers: dict[tuple[str, bool], str] = {}
+    for cid_k in [None, *[c["id"] for c in all_cs]]:
+        for is_wide in (False, True):
+            cf = covers.cover_file(cid_k, wide=is_wide)
+            if cf:
+                v = int(cf.stat().st_mtime)
+                w_q = "&w=1" if is_wide else ""
+                default_covers[(cid_k or "", is_wide)] = (
+                    f"/api/creators/{cid_k}/cover?v={v}{w_q}" if cid_k else f"/api/cover?v={v}{('&w=1' if is_wide else '')}".replace("?&", "?")
+                )
     show = []
-    for p in queue + done:
+    for p in queue[:180] + done:
         j_obj, k_obj = clip_meta.get((p.get("job"), p.get("clip")), ({}, {}))
         made_ts = k_obj.get("rendered_at") or k_obj.get("made_at") or p.get("made_at") or j_obj.get("created") or p.get("created") or 0
         queued_ts = p.get("created") or made_ts
@@ -683,8 +710,15 @@ def overview() -> dict:
         cap_body = _caption(k_obj, cr_obj, plat) if k_obj else ""
         cap_ready = f"{title_txt}\n\n{cap_body}".strip() if cap_body else title_txt
         tags_ready = " ".join("#" + h for h in _caption_tags(k_obj, plat)) if k_obj else ""
-        cov_name = Path(str(k_obj.get("cover") or "")).name if k_obj.get("cover") else ""
-        cov_url = f"/media/{p['job']}/{cov_name}" if (cov_name and p.get("job")) else ""
+        is_wide = p.get("format", "9:16") == "16:9"
+        cov_override = default_covers.get((p.get("creator") or "", is_wide))
+        if cov_override:
+            cov_url = cov_override
+            cov_dl = cov_url + ("&download=1" if "?" in cov_url else "?download=1")
+        else:
+            cov_name = Path(str(k_obj.get("cover") or "")).name if k_obj.get("cover") else ""
+            cov_url = f"/media/{p['job']}/{cov_name}" if (cov_name and p.get("job")) else ""
+            cov_dl = (cov_url + "?download=1") if cov_url else ""
         show.append({
             **{k: v for k, v in p.items() if k != "user"},
             "creator_name": names.get(p["creator"], ""),
@@ -697,7 +731,8 @@ def overview() -> dict:
             "hook": k_obj.get("hook") or "",
             "thumb_text": k_obj.get("thumb_text") or "",
             "cover_url": cov_url,
-            "cover_dl": (cov_url + "?download=1") if cov_url else "",
+            "cover_dl": cov_dl,
+            "has_default_cover": bool(cov_override or k_obj.get("has_default_cover")),
             "caption_ready": cap_ready,
             "hashtags_ready": tags_ready,
             "inbox_mode": bool(plat == "tiktok" and p.get("status") == "posted" and "v_inbox" in str(p.get("remote_id") or "")),
@@ -719,6 +754,7 @@ def overview() -> dict:
     st = accounts.settings()
     return {"paused": bool(st.get("paused")), "paused_platforms": list(st.get("paused_platforms") or []),
             "platform_prefs": accounts.platform_prefs(st),
+            "queued_by_platform": queued_by_platform,
             "accounts": accounts.list_accounts(),
             "creators": rows, "posts": show, "daily": daily,
             "alerts": alerts.configured(), "recording": len(live.active_mine())}

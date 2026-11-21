@@ -24,6 +24,7 @@ DEFAULTS = {"name": "", "channel": "", "style": "bounce", "layout": "blur", "cap
             "privacy": "public", "post_footer": "", "rate_per_1k": 0.0, "channels": {},
             "long_enabled": False, "long_mode": "off", "long_min_len": 600, "long_max_len": 1200, "long_every_min": 20, "long_min_score": 78,
             "derive_shorts": True, "thumb_mode": "local",
+            "cover_mode": "clip", "cover_first_frame": True,
             "series_enabled": False, "series_part_min": 60, "series_part_max": 90}
 PLATFORMS = ("youtube", "twitch", "kick")
 
@@ -72,8 +73,10 @@ def _clean(data: dict) -> dict:
         if k in NUMERIC:
             lo, hi = NUMERIC[k]
             v = max(lo, min(hi, int(float(v))))
-        elif k in ("auto_watch", "autopost", "ai_only_on_spike", "long_enabled", "series_enabled", "derive_shorts"):
+        elif k in ("auto_watch", "autopost", "ai_only_on_spike", "long_enabled", "series_enabled", "derive_shorts", "cover_first_frame"):
             v = bool(v)
+        elif k == "cover_mode":
+            v = v if v in ("clip", "custom", "global") else "clip"
         elif k == "long_mode":
             v = v if v in ("off", "block", "compile", "both") else "off"
         elif k == "thumb_mode":
