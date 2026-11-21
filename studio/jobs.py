@@ -559,7 +559,11 @@ def render_one(job, clip, words):
         is_16_9 = clip.get("format") == "16:9" or clip.get("layout") == "horizontal"
         need_caps = False if is_16_9 else clip.get("captions", True)
         near = _caption_words(job, clip, words, off) if need_caps else []
-        out = render.render_clip(src, d / "clips", clip["id"], local, near, job.get("width") or 1280, job.get("height") or 720)
+        from . import covers
+        dc_path = covers.cover_file(job.get("creator"), wide=is_16_9)
+        dc_first = False if is_16_9 else bool(covers.should_inject_first_frame(job.get("creator")))
+        rc_kw = {"default_cover": dc_path, "cover_first_frame": dc_first} if dc_path else {}
+        out = render.render_clip(src, d / "clips", clip["id"], local, near, job.get("width") or 1280, job.get("height") or 720, **rc_kw)
         now_ts = time.time()
         clip.update(out, status="done", version=clip.get("version", 0) + 1, error=None, rendered_at=now_ts)
         if clip["version"] > 1:
