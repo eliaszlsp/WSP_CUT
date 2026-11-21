@@ -121,8 +121,8 @@ def _load_sherpa():
             return mod
     except OSError:
         pass
-    raise RuntimeError("PeakCut is in a folder too deep for Windows to load the speech model from. Move the PeakCut "
-                       "folder somewhere short, like C:\\peakcut, and start it again.") from first
+    raise RuntimeError("VICE CUT AI is in a folder too deep for Windows to load the speech model from. Move the VICE CUT AI "
+                       "folder somewhere short, like C:\\vicecut, and start it again.") from first
 
 
 def _new():

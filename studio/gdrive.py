@@ -340,7 +340,7 @@ def connect_finish(code: str, state: str) -> dict:
     }, timeout=30), "Google Drive sign-in").json()
     if not tok.get("refresh_token"):
         raise ValueError(
-            "Google did not return a long-lived sign-in. Remove PeakCut's access in your Google account and connect again."
+            "Google did not return a long-lived sign-in. Remove VICE CUT AI's access in your Google account and connect again."
         )
     if not tok.get("access_token"):
         raise RuntimeError("Google did not return an access token.")

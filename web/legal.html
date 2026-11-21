@@ -7,9 +7,9 @@
 <meta name="description" content="{{DESC}}">
 <link rel="canonical" href="{{SITE}}/{{PAGE_PATH}}">
 <meta name="robots" content="index,follow">
-<link rel="icon" type="image/svg+xml" href="/brand/favicon.svg">
+<link rel="icon" type="image/svg+xml" href="/brand/favicon.svg?v=vc3">
 <style>
-:root{--brand:#FF2E93;--ink:#FFF3EC;--deep:#36E2D0;--bg:#0C0918;--surface:#130E24;--muted:#1A1430;--line:#251D42;--text:#F5F0FF;--dim:#A69FBC;--faint:#756C90;color-scheme:dark}
+:root{--brand:#FF2E93;--ink:#FFFFFF;--deep:#36E2D0;--bg:#0C0918;--surface:#130E24;--muted:#1A1430;--line:#251D42;--text:#FFFFFF;--dim:#E0DBF2;--faint:#B8B0D2;color-scheme:dark}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);font:16px/1.7 "Geist","Segoe UI",system-ui,-apple-system,sans-serif;-webkit-font-smoothing:antialiased}
 a{color:var(--deep)}
@@ -18,7 +18,7 @@ header{position:sticky;top:0;background:var(--surface);border-bottom:1px solid v
 .bar img{height:30px;display:block}
 .bar nav{margin-left:auto;display:flex;gap:2px;padding:3px;background:var(--muted);border-radius:10px;overflow-x:auto;max-width:100%}
 .bar nav a{font-size:14px;font-weight:600;color:var(--dim);text-decoration:none;padding:6px 12px;border-radius:8px;white-space:nowrap;transition:background-color .15s ease,color .15s ease}
-.bar nav a:hover{background:#EDE3DB;color:var(--text)}
+.bar nav a:hover{background:rgba(255,255,255,.12);color:var(--text)}
 body[data-page=privacy] nav a[href="/privacy"],body[data-page=terms] nav a[href="/terms"],
 body[data-page=acceptable-use] nav a[href="/acceptable-use"]{background:var(--brand);color:#FFFFFF}
 main{max-width:860px;margin:0 auto;padding:40px 20px 80px}
@@ -36,14 +36,14 @@ footer.site{background:#070510;color:var(--dim);padding:56px 0 28px;font-size:14
 footer.site .fwrap{max-width:1160px;margin:0 auto;padding:0 24px}
 footer.site .fgrid{display:grid;grid-template-columns:1.4fr repeat(3,1fr);gap:32px}
 footer.site .fbrand img{height:30px;display:block;margin-bottom:14px}
-footer.site .fbrand p{max-width:300px;line-height:1.6;margin:0 0 18px;color:#B9A597}
+footer.site .fbrand p{max-width:300px;line-height:1.6;margin:0 0 18px;color:#D4CEE8}
 footer.site .fbrand a.fcta{display:inline-flex;align-items:center;gap:8px;height:40px;padding:0 16px;border-radius:10px;background:var(--brand);color:#FFFFFF;font-weight:600;text-decoration:none;transition:background-color .15s ease}
 footer.site .fbrand a.fcta:hover{background:#FF54A8}
 footer.site h4{font-size:13px;font-weight:600;color:#fff;margin:4px 0 14px}
 footer.site ul{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:10px}
-footer.site ul a{color:#B9A597;text-decoration:none;transition:color .15s ease}
+footer.site ul a{color:#D4CEE8;text-decoration:none;transition:color .15s ease}
 footer.site ul a:hover{color:#36E2D0}
-footer.site .fbottom{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:44px;padding-top:20px;border-top:1px solid rgba(255,255,255,.08);font-size:13px;color:#8C7B70}
+footer.site .fbottom{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:44px;padding-top:20px;border-top:1px solid rgba(255,255,255,.08);font-size:13px;color:#B8B0D2}
 @media (max-width:760px){footer.site .fgrid{grid-template-columns:1fr 1fr}footer.site .fbrand{grid-column:1/-1}}
 html{scroll-behavior:smooth}
 article{animation:legalin .35s ease both}
@@ -52,7 +52,7 @@ article{animation:legalin .35s ease both}
 </style>
 </head>
 <body data-page="{{PAGE}}">
-<header><div class="bar"><a href="/" aria-label="VICE CUT AI home"><img src="/brand/logo.svg" alt="VICE CUT AI" width="120" height="30"></a>
+<header><div class="bar"><a href="/" aria-label="VICE CUT AI home"><img src="/brand/logo.svg?v=vc3" alt="VICE CUT AI" width="120" height="30"></a>
   <nav aria-label="Legal pages"><a href="/terms">Terms</a><a href="/privacy">Privacy</a><a href="/acceptable-use">Acceptable use</a></nav></div></header>
 <main>
 
@@ -216,7 +216,7 @@ article{animation:legalin .35s ease both}
 </main>
 <footer class="site"><div class="fwrap">
   <div class="fgrid">
-    <div class="fbrand"><a href="/" aria-label="VICE CUT AI home"><img src="/brand/logo-light.svg" alt="VICE CUT AI" width="120" height="30"></a>
+    <div class="fbrand"><a href="/" aria-label="VICE CUT AI home"><img src="/brand/logo-light.svg?v=vc3" alt="VICE CUT AI" width="120" height="30"></a>
       <p>AI clipping for Twitch, Kick and YouTube streams. Captioned vertical clips while the stream is still live. Free and open source.</p>
       <a class="fcta" href="/signup">Sign up</a></div>
     <div><h4>Product</h4><ul><li><a href="/#how">How it works</a></li><li><a href="/#features">Features</a></li><li><a href="/#live">Live clipping</a></li><li><a href="/#open">Open source</a></li><li><a href="/#faq">FAQ</a></li></ul></div>

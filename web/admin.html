@@ -5,16 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <title>VICE CUT AI Admin</title>
-<link rel="icon" type="image/svg+xml" href="/brand/favicon.svg">
+<link rel="icon" type="image/svg+xml" href="/brand/favicon.svg?v=vc3">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root{
-  --brand:#FF2E93;--brand-press:#E01174;--brand-ink:#FFF3EC;--brand-soft:rgba(255,46,147,.16);--brand-line:rgba(255,46,147,.38);--brand-deep:#36E2D0;
-  --frame:#070510;--frame-2:#120D22;--frame-line:rgba(166,161,177,.12);--frame-text:#FFF3EC;--frame-dim:#9E97B4;
+  --brand:#FF2E93;--brand-press:#E01174;--brand-ink:#FFFFFF;--brand-soft:rgba(255,46,147,.16);--brand-line:rgba(255,46,147,.38);--brand-deep:#36E2D0;
+  --frame:#070510;--frame-2:#120D22;--frame-line:rgba(166,161,177,.12);--frame-text:#FFFFFF;--frame-dim:#D4CEE8;
   --bg:#0C0918;--surface:#130E24;--muted:#1A1430;--line:#251D42;--line-2:#34295A;
-  --text:#F5F0FF;--dim:#A69FBC;--faint:#756C90;
+  --text:#FFFFFF;--dim:#E0DBF2;--faint:#B8B0D2;
   --good:#36E2D0;--good-soft:rgba(54,226,208,.14);--bad:#FF4D6A;--bad-soft:rgba(255,77,106,.16);
   --r-lg:16px;--r:12px;--r-sm:8px;
   color-scheme:dark;
@@ -28,7 +28,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 svg{width:18px;height:18px;flex:none;fill:currentColor}
 ::selection{background:var(--brand-line)}
 :focus-visible{outline:2px solid var(--brand);outline-offset:2px}
-::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:#E2D9D7;border-radius:999px;border:3px solid #fff}
+::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:#2D234E;border-radius:999px;border:3px solid #0C0918}
 
 .app{display:grid;grid-template-columns:240px minmax(0,1fr);height:100vh}
 .side{background:var(--frame);color:var(--frame-text);display:flex;flex-direction:column;height:100vh;padding:14px 10px 12px;min-width:0}
@@ -60,13 +60,13 @@ main{background:var(--bg);margin:8px 8px 8px 0;border-radius:var(--r-lg);height:
 .btn:hover{background:var(--muted)}
 .btn.primary{background:var(--brand);border-color:var(--brand);color:#FFFFFF}
 .btn.primary:hover{background:#FF54A8;border-color:#FF54A8}
-.btn.primary:disabled{background:#F3E7DD;border-color:#F3E7DD;color:#B9A597;cursor:not-allowed}
+.btn.primary:disabled{background:#F3E7DD;border-color:#F3E7DD;color:#D4CEE8;cursor:not-allowed}
 .btn.danger{background:var(--bad-soft);border-color:transparent;color:var(--bad)}
-.btn.danger:hover{background:#FADDE0}
+.btn.danger:hover{background:rgba(255,77,106,.32)}
 .btn.sm{height:32px;padding:0 11px;font-size:13px;gap:6px}
 .btn.sm svg{width:16px;height:16px}
 input[type=text],input[type=search],input[type=number],textarea{height:38px;padding:0 12px;border-radius:var(--r);border:1px solid var(--line-2);background:var(--surface);width:100%;transition:border-color .15s ease}
-input:hover,textarea:hover{border-color:#CFC4BC}
+input:hover,textarea:hover{border-color:rgba(255,255,255,.35)}
 input:focus,textarea:focus{outline:0;border-color:var(--brand)}
 label.f{display:flex;flex-direction:column;gap:7px;font-size:12px;color:var(--dim);font-weight:600}
 
@@ -164,7 +164,7 @@ dialog::backdrop{background:rgba(14,12,11,.42)}
 <body>
 <div class="app">
   <aside class="side" aria-label="Sidebar">
-    <div class="side-head"><img class="logo" src="/brand/logo-light.svg" alt="VICE CUT AI"></div>
+    <div class="side-head"><img class="logo" src="/brand/logo-light.svg?v=vc3" alt="VICE CUT AI"></div>
     <nav class="nav" id="nav" aria-label="Admin"></nav>
     <div class="side-foot" id="foot"></div>
   </aside>

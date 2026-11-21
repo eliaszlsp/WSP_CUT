@@ -46,9 +46,9 @@ def full_message() -> str:
         free = shutil_free(config.DATA_DIR)
     except OSError:
         free = 0.0
-    return (f"The drive PeakCut saves to ({drive_of(config.DATA_DIR)}) is almost full: {free:.1f} GB free, and PeakCut needs "
+    return (f"The drive VICE CUT AI saves to ({drive_of(config.DATA_DIR)}) is almost full: {free:.1f} GB free, and VICE CUT AI needs "
             f"at least {load.MIN_FREE_DISK_GB:g} GB to make clips safely. Free up some space on that drive, or move "
-            f"PeakCut's folder to a bigger drive in Settings, Storage.")
+            f"VICE CUT AI's folder to a bigger drive in Settings, Storage.")
 
 
 def shutil_free(path: Path) -> float:
@@ -92,7 +92,7 @@ def open_folder():
 
 
 _PICK = ("import tkinter as tk\nfrom tkinter import filedialog\nr = tk.Tk()\nr.withdraw()\nr.attributes('-topmost', True)\n"
-         "print(filedialog.askdirectory(title='Choose where PeakCut keeps its videos and clips') or '')\n")
+         "print(filedialog.askdirectory(title='Choose where VICE CUT AI keeps its videos and clips') or '')\n")
 
 
 def pick_folder() -> str:
@@ -116,22 +116,22 @@ def change(path: str, move: bool = True) -> dict:
         raise ValueError("Choose a folder.")
     new = Path(os.path.expanduser(raw))
     if not new.is_absolute():
-        raise ValueError("Give the whole path of the folder, for example D:\\PeakCut.")
+        raise ValueError("Give the whole path of the folder, for example D:\\ViceCutAI.")
     new, old = new.resolve(), config.DATA_DIR.resolve()
     if new == old:
-        raise ValueError("That is the folder PeakCut already uses.")
+        raise ValueError("That is the folder VICE CUT AI already uses.")
     if old in new.parents or new in old.parents:
-        raise ValueError("Choose a folder that is not inside PeakCut's current folder (or the other way round).")
+        raise ValueError("Choose a folder that is not inside VICE CUT AI's current folder (or the other way round).")
     try:
         new.mkdir(parents=True, exist_ok=True)
         probe = new / ".peakcut-write-test"
         probe.write_text("ok", encoding="utf-8")
         probe.unlink()
     except OSError:
-        raise ValueError("PeakCut can't write to that folder. Choose another one, or check the drive is connected.")
+        raise ValueError("VICE CUT AI can't write to that folder. Choose another one, or check the drive is connected.")
     need = used_bytes() / 1e9 if move and drive_of(new) != drive_of(old) else 0.0
     if shutil_free(new) < need + load.MIN_FREE_DISK_GB:
-        raise ValueError(f"There isn't enough room there: {shutil_free(new):.1f} GB free, and PeakCut needs about "
+        raise ValueError(f"There isn't enough room there: {shutil_free(new):.1f} GB free, and VICE CUT AI needs about "
                          f"{need + load.MIN_FREE_DISK_GB:.1f} GB.")
     data = {"path": str(new)}
     if move:

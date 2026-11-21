@@ -39,7 +39,7 @@ def _html(title: str, intro: str, button: str, link: str, outro: str, logo_src: 
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#0C0918"><tr><td align="center" style="padding:36px 14px">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px">
     <tr><td style="padding:0 6px 22px"><a href="{e(site)}" style="text-decoration:none">
-      <img src="{e(logo_src)}" width="138" height="38" alt="PeakCut" style="display:block;border:0;width:138px;height:38px"></a></td></tr>
+      <img src="{e(logo_src)}" width="138" height="38" alt="VICE CUT AI" style="display:block;border:0;width:138px;height:38px"></a></td></tr>
     <tr><td style="background:#130E24;border-radius:18px;border:1px solid #251D42;padding:36px 34px">
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
         <tr><td style="font-family:{font};font-size:24px;line-height:1.25;font-weight:700;color:#FFF3EC;padding-bottom:12px">{e(title)}</td></tr>
@@ -53,14 +53,14 @@ def _html(title: str, intro: str, button: str, link: str, outro: str, logo_src: 
           Button not working? Copy this link into your browser:<br><a href="{e(link)}" style="color:#36E2D0;word-break:break-all">{e(link)}</a></td></tr>
       </table></td></tr>
     <tr><td align="center" style="padding:24px 10px 0;font-family:{font};font-size:12px;line-height:1.7;color:#9C8A7E">
-      You're getting this because of your PeakCut account. We only email you about your account.<br>
-      <a href="{e(site)}" style="color:#7A6A60;text-decoration:underline">PeakCut</a> &nbsp;·&nbsp;
+      You're getting this because of your VICE CUT AI account. We only email you about your account.<br>
+      <a href="{e(site)}" style="color:#7A6A60;text-decoration:underline">VICE CUT AI</a> &nbsp;·&nbsp;
       <a href="{e(site)}/privacy" style="color:#7A6A60;text-decoration:underline">Privacy</a> &nbsp;·&nbsp;
       <a href="{e(site)}/terms" style="color:#7A6A60;text-decoration:underline">Terms</a></td></tr>
   </table></td></tr></table></body></html>"""
 
 
-def preview(title="Confirm your email", intro="Thanks for joining PeakCut. Confirm this is your email address to start clipping.",
+def preview(title="Confirm your email", intro="Thanks for joining VICE CUT AI. Confirm this is your email address to start clipping.",
             button="Confirm my email", link=None, outro="The link works for 3 days. If you didn't sign up, you can ignore this email.") -> str:
     """The same email for viewing in a browser: the logo is inlined so it shows without an email app."""
     import base64
@@ -81,7 +81,7 @@ def send(to: str, subject: str, title: str, intro: str, button: str, link: str, 
         return False
     msg = EmailMessage()
     name, addr = parseaddr(config.MAIL_FROM)
-    msg["From"] = formataddr((name or "PeakCut", addr))
+    msg["From"] = formataddr((name or "VICE CUT AI", addr))
     msg["To"] = to
     msg["Subject"] = subject
     msg["Message-ID"] = make_msgid(domain=addr.split("@")[-1] if "@" in addr else None)
