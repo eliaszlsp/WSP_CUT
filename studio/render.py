@@ -154,11 +154,11 @@ def _hook_events(hook, dur, y):
            f"l {n(x1)} {n(y1 - r)} b {n(x1)} {n(y1)} {n(x1)} {n(y1)} {n(x1 - r)} {n(y1)} "
            f"l {n(x0 + r)} {n(y1)} b {n(x0)} {n(y1)} {n(x0)} {n(y1)} {n(x0)} {n(y1 - r)} "
            f"l {n(x0)} {n(y0 + r)} b {n(x0)} {n(y0)} {n(x0)} {n(y0)} {n(x0 + r)} {n(y0)}")
-    span = f"{_ts(0)},{_ts(dur)}"
-    ev = [f"Dialogue: 3,{span},Hook,,0,0,0,,{{\\an7\\pos(0,0)\\fad(160,0)\\c&H{HOOK['box']}&\\p1}}{box}{{\\p0}}"]
+    span = f"{_ts(0)},{_ts(min(dur, 7.0))}"
+    ev = [f"Dialogue: 3,{span},Hook,,0,0,0,,{{\\an7\\pos(0,0)\\fad(160,250)\\c&H{HOOK['box']}&\\p1}}{box}{{\\p0}}"]
     for i, line in enumerate(lines):
         cy = y - line_h * (len(lines) - 1) / 2 + i * line_h - f.cap_shift(size)
-        ev.append(f"Dialogue: 4,{span},Hook,,0,0,0,,{{\\an5\\pos({W // 2},{cy:.0f})\\fad(160,0)\\fs{size}}}{line}")
+        ev.append(f"Dialogue: 4,{span},Hook,,0,0,0,,{{\\an5\\pos({W // 2},{cy:.0f})\\fad(160,250)\\fs{size}}}{line}")
     return ev
 
 
@@ -175,7 +175,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Cap,{st['font']},{st['size']},&H00{st['base']},&H00{st['base']},&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,{st['outline']},0,5,0,0,0,1
+Style: Cap,{st['font']},{st['size']},&H00{st['base']},&H00{st['base']},&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,{st['outline']},2,5,0,0,0,1
 Style: Hook,{HOOK['font']},{HOOK['size']},&H00{HOOK['ink']},&H00{HOOK['ink']},&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,5,0,0,0,1
 
 [Events]
@@ -294,21 +294,22 @@ def _encode_cmd(work: Path, base: list, out_file: str, enc_timeout: int):
     raise RuntimeError(f"Render failed: {err}")
 
 
-def _scaled_facecam(face, src_w: int, src_h: int):
+def _scaled_facecam(face, src_w: int, src_h: int, out_w: int = 1280, out_h: int = 720):
     if not face or len(face) != 4 or not src_w or not src_h:
         return None
-    sx, sy = 1920.0 / src_w, 1080.0 / src_h
+    sx, sy = float(out_w) / src_w, float(out_h) / src_h
     return [round(face[0] * sx), round(face[1] * sy), round(face[2] * sx), round(face[3] * sy)]
 
 
-def _thumb_for_long(out_dir: Path, name: str, clip: dict, peak_t: float, src_w: int, src_h: int):
+def _thumb_for_long(out_dir: Path, name: str, clip: dict, peak_t: float, src_w: int, src_h: int,
+                    out_w: int = 1280, out_h: int = 720):
     out_mp4 = out_dir / f"{name}.mp4"
     thumbs.generate(
         out_mp4,
         out_dir / f"{name}.jpg",
         peak_t=peak_t,
         text=clip.get("thumb_text") or clip.get("hook") or clip.get("title") or "",
-        facecam=_scaled_facecam(clip.get("facecam"), src_w, src_h),
+        facecam=_scaled_facecam(clip.get("facecam"), src_w, src_h, out_w, out_h),
         mode=clip.get("thumb_mode") or "local",
     )
 
@@ -355,7 +356,7 @@ def render_compilation(src: Path, out_dir: Path, name: str, clip: dict, src_w: i
             f = work / f"{name}.{ext}"
             if f.exists():
                 shutil.move(str(f), str(out_dir / f"{name}.{ext}"))
-        _thumb_for_long(out_dir, name, clip, cover_t, src_w, src_h)
+        _thumb_for_long(out_dir, name, clip, cover_t, src_w, src_h, out_w=1920, out_h=1080)
         return {"file": f"{name}.mp4", "cover": f"{name}.jpg", "layout": "horizontal"}
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -398,8 +399,9 @@ def render_clip(src: Path, out_dir: Path, name: str, clip: dict, words: list, sr
             if pt is not None and start <= float(pt) <= end:
                 local_peak_t = max(0.0, min(max(0.0, (end - start) - 0.1), float(pt) - start))
             else:
-                local_peak_t = min(1.2, (end - start) / 2)
-            _thumb_for_long(out_dir, name, clip, local_peak_t, src_w, src_h)
+                local_peak_t = min(max(3.0, (end - start) * 0.35), (end - start) / 2)
+            out_w, out_h = (1920, 1080) if fg_h >= 1080 else (1280, 720)
+            _thumb_for_long(out_dir, name, clip, local_peak_t, src_w, src_h, out_w=out_w, out_h=out_h)
         return res
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -423,7 +425,7 @@ def _render_in(work: Path, src: Path, out_dir: Path, name: str, start, end, layo
     if peak_t is not None and start <= float(peak_t) <= end:
         cover_t = max(0.0, min(max(0.0, (end - start) - 0.1), float(peak_t) - start))
     else:
-        cover_t = min(1.2, (end - start) / 2)
+        cover_t = min(max(3.0, (end - start) * 0.35), (end - start) / 2) if layout == "horizontal" else min(1.2, (end - start) / 2)
     run(["ffmpeg", "-y", "-v", "error", "-ss", f"{cover_t:.2f}", "-i", f"{name}.mp4", "-frames:v", "1",
          "-q:v", "3", f"{name}.jpg"], cwd=work)
     for ext in ("mp4", "jpg", "ass"):

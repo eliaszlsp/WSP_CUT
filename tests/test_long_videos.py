@@ -177,10 +177,10 @@ with ctx.as_user(UID):
     )
 
 # ---- 3. studio/posting.py ----
-check("platform_gap tiktok floor", posting.platform_gap("tiktok", 5), 30)
-check("platform_gap instagram floor", posting.platform_gap("instagram", 10), 30)
-check("platform_gap youtube floor", posting.platform_gap("youtube", 5), 20)
-check("platform_gap youtube respects larger gap", posting.platform_gap("youtube", 45), 45)
+check("platform_gap tiktok floor", posting.platform_gap("tiktok", 5), 120)
+check("platform_gap instagram floor", posting.platform_gap("instagram", 10), 90)
+check("platform_gap youtube floor", posting.platform_gap("youtube", 5), 90)
+check("platform_gap youtube respects larger gap", posting.platform_gap("youtube", 120), 120)
 check("platform_gap other floor", posting.platform_gap("twitch", 1), 5)
 
 check("clip_priority 16:9 is 1", posting.clip_priority({"format": "16:9"}), 1)
@@ -251,13 +251,13 @@ with ctx.as_user(UID):
     posting._posts.extend([
         {"id": "p3", "user": UID, "job": j_post["id"], "clip": "c_short", "creator": c_post["id"],
          "account": "yt1", "account_name": "YT", "platform": "youtube", "status": "scheduled",
-         "due_at": now_t - 30, "created": now_t - 30, "priority": 3, "format": "9:16"},
+         "due_at": now_t - 30, "created": now_t - 30, "priority": 3, "format": "9:16", "manual_now": True},
         {"id": "p2", "user": UID, "job": j_post["id"], "clip": "c_derived", "creator": c_post["id"],
          "account": "yt1", "account_name": "YT", "platform": "youtube", "status": "scheduled",
-         "due_at": now_t - 20, "created": now_t - 20, "priority": 2, "format": "9:16"},
+         "due_at": now_t - 20, "created": now_t - 20, "priority": 2, "format": "9:16", "manual_now": True},
         {"id": "p1", "user": UID, "job": j_post["id"], "clip": "c_long", "creator": c_post["id"],
          "account": "yt1", "account_name": "YT", "platform": "youtube", "status": "scheduled",
-         "due_at": now_t - 10, "created": now_t - 10, "priority": 1, "format": "16:9"},
+         "due_at": now_t - 10, "created": now_t - 10, "priority": 1, "format": "16:9", "manual_now": True},
     ])
     order = []
 
@@ -598,7 +598,7 @@ for needle in (
     'Derived Short',
     '16:9 videos post to YouTube only',
     'P1 · 16:9',
-    'P2 · Derived',
+    'P2 · Derivado',
 ):
     check(f"UI contains {needle}", needle in html_text, True)
 
@@ -611,6 +611,37 @@ if scripts:
     js_tmp.write_text("\n".join(scripts), encoding="utf-8")
     node_res = subprocess.run(["node", "--check", str(js_tmp)], capture_output=True, text=True)
     check("UI JS passes node --check", node_res.returncode, 0)
+
+# ---- 9. OpenRouter free task routing, collage thumbnails & 5-10s hook / clickbait rules ----
+pool_models = [
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "nvidia/nemotron-3.5-super-vl:free",
+    "baidu/ernie-5.5-flash-preview:free",
+    "openrouter/free",
+]
+with patch.object(ai, "current", return_value={"provider": "openrouter", "models": pool_models, "base_url": "", "key": "or-test-key-123456"}), \
+     patch.object(ai, "fallback", return_value={"provider": "", "models": [], "base_url": "", "key": "", "ready": False, "label": ""}):
+    t_editorial = [m for _, m in ai.targets("Live: words judge")]
+    t_caption = [m for _, m in ai.targets("Caption wording fix")]
+    t_vision = [m for _, m in ai.targets("vision")]
+    check("editorial purpose puts 550b ultra first", t_editorial[0], "nvidia/nemotron-3-ultra-550b-a55b:free")
+    check("caption purpose puts fast VL first", t_caption[0], "nvidia/nemotron-3.5-super-vl:free")
+    check("vision purpose skips text-only 550b and puts VL first", t_vision[0], "nvidia/nemotron-3.5-super-vl:free")
+    check("vision purpose excludes text-only 550b", "nvidia/nemotron-3-ultra-550b-a55b:free" not in t_vision, True)
+
+ass_20s = render.build_ass([{"w": "olá", "s": 0.5, "e": 1.0}], 0.0, 20.0, "GANCHO EXPLOSIVO", "bounce", [], 300, 1380)
+check("hook banner stays for 7s (5-10s hook window) on 20s clip", "0:00:00.00,0:00:07.00,Hook" in ass_20s, True)
+check("RULES includes 5-10 second hook rule", "5-10 SECOND HOOK RULE" in brain.RULES, True)
+check("LONG_BLOCK_RULES includes 5-10 second hook rule", "5-10 SECOND HOOK RULE" in brain.LONG_BLOCK_RULES, True)
+
+collage_jpg = TMP_DIR / "thumb_collage_ai.jpg"
+with patch.object(ai, "ready", return_value=True), \
+     patch.object(ai, "provider", return_value="openrouter"), \
+     patch.object(ai, "see", return_value=("2", 120, 5)):
+    out_col = thumbs.generate(syn_src, collage_jpg, peak_t=1.2, text="SEGREDO PROIBIDO!", facecam=[20, 20, 120, 90], mode="ai", collage=True)
+    check("collage AI vision selector generates valid jpg", out_col.is_file(), True)
+    with Image.open(out_col) as im_col:
+        check("collage thumb is 1280x720", im_col.size, (1280, 720))
 
 print(f"\nSummary: {len(fails)} failed" if fails else "\nALL PASSED")
 sys.exit(1 if fails else 0)

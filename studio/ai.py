@@ -29,13 +29,40 @@ PROVIDERS = {
     "openai": ("OpenAI", "https://api.openai.com/v1", "openai", "https://platform.openai.com/api-keys", "gpt-4o-mini"),
     "xai": ("Grok", "https://api.x.ai/v1", "openai", "https://console.x.ai", "grok-4"),
     "groq": ("Groq", "https://api.groq.com/openai/v1", "openai", "https://console.groq.com/keys", "llama-3.3-70b-versatile"),
-    "openrouter": ("OpenRouter", "https://openrouter.ai/api/v1", "openai", "https://openrouter.ai/keys", "google/gemini-2.5-flash"),
+    "openrouter": ("OpenRouter", "https://openrouter.ai/api/v1", "openai", "https://openrouter.ai/keys", "nvidia/nemotron-3-ultra-550b-a55b:free"),
     "anthropic": ("Claude", "https://api.anthropic.com/v1", "anthropic", "https://console.anthropic.com", ""),
     "ollama": ("Ollama (on this machine)", "http://127.0.0.1:11434/v1", "openai", "https://ollama.com", "llama3.1"),
     "custom": ("Custom (OpenAI-compatible)", "", "openai", "", ""),
 }
 ALIASES = {"google": "gemini", "grok": "xai", "claude": "anthropic", "local": "ollama"}
 NO_KEY = {"ollama", "custom"}       # a model running on your own machine needs no key
+
+# Task-specialized free model rankings on OpenRouter (550B flagship for editorial/copy, VL for vision/fast JSON).
+OPENROUTER_FREE_HEAVY = (
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "nvidia/nemotron-3.5-super-vl:free",
+    "baidu/ernie-5.5-flash-preview:free",
+    "openrouter/free",
+)
+OPENROUTER_FREE_FAST = (
+    "nvidia/nemotron-3.5-super-vl:free",
+    "baidu/ernie-5.5-flash-preview:free",
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "openrouter/free",
+)
+OPENROUTER_FREE_VISION = (
+    "nvidia/nemotron-3.5-super-vl:free",
+    "openrouter/free",
+    "dots-studio/dots-3-note-preview:free",
+)
+OPENROUTER_TEXT_ONLY_FREE = {
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "baidu/ernie-5.5-flash-preview:free",
+    "nvidia/nemotron-3.5-lightning:free",
+    "liquid/lfm-3-1.7b:free",
+    "recursive/flint-v1.0:free",
+}
+OPENROUTER_FREE_POOL = set(OPENROUTER_FREE_HEAVY) | set(OPENROUTER_FREE_VISION) | OPENROUTER_TEXT_ONLY_FREE
 
 # ---------------------------------------------------------------- the settings in use
 _lock = threading.RLock()
@@ -144,15 +171,32 @@ def fallback() -> dict:
     return {**slot, "ready": _slot_ready(slot), "label": PROVIDERS.get(fp, ("",))[0]}
 
 
-def targets() -> list[tuple[str, str]]:
+def _order_for_purpose(provider_id: str, ms: list[str], purpose: str) -> list[str]:
+    if not purpose or provider_id != "openrouter" or not ms:
+        return list(ms)
+    if not any(m in OPENROUTER_FREE_POOL for m in ms):
+        return list(ms)
+    low = purpose.lower()
+    if "vision" in low or "webcam" in low or "thumb" in low:
+        rank = {m: i for i, m in enumerate(OPENROUTER_FREE_VISION)}
+        vis = [m for m in ms if m not in OPENROUTER_TEXT_ONLY_FREE]
+        if not vis:
+            return list(OPENROUTER_FREE_VISION)
+        return sorted(vis, key=lambda m: (rank.get(m, 99), ms.index(m)))
+    pref = OPENROUTER_FREE_FAST if "caption" in low else OPENROUTER_FREE_HEAVY
+    rank = {m: i for i, m in enumerate(pref)}
+    return sorted(ms, key=lambda m: (rank.get(m, 99), ms.index(m)))
+
+
+def targets(purpose: str = "") -> list[tuple[str, str]]:
     """Ordered (provider_id, model_id) pairs to try: primary models first, then fallback models if ready."""
     out = []
     c = current()
     if _slot_ready(c):
-        out.extend((c["provider"], m) for m in c["models"])
+        out.extend((c["provider"], m) for m in _order_for_purpose(c["provider"], c["models"], purpose))
     fb = fallback()
     if fb["ready"] and fb["provider"] != c["provider"]:
-        out.extend((fb["provider"], m) for m in fb["models"])
+        out.extend((fb["provider"], m) for m in _order_for_purpose(fb["provider"], fb["models"], purpose))
     return out
 
 
@@ -791,7 +835,10 @@ def see(prompt: str, image: bytes, timeout: float | None = None) -> tuple[str, i
     comes back empty, or says something the caller does not understand, and the caller carries on without
     it. The picture is a JPEG, passed as base64 inside the ordinary message."""
     import time
-    ts = targets()
+    try:
+        ts = targets("vision")
+    except TypeError:
+        ts = targets()
     if not ts or not image:
         return "", 0, 0
     b64 = base64.b64encode(image).decode()
