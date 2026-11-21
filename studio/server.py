@@ -34,7 +34,7 @@ def _quiet(fn):
         print(f"  {e}", flush=True)
 
 
-app = FastAPI(title="PeakCut", docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="VICE CUT AI", docs_url=None, redoc_url=None, openapi_url=None)
 WEB = config.ROOT / "web"
 OPEN = ("/api/auth/", "/pub/", "/api/public", "/auth/google/", "/auth/verify", "/brand/", "/assets/", "/healthz", "/favicon.ico", "/robots.txt", "/sitemap.xml")
 PAGES = {"/": "landing.html", "/login": "auth.html", "/signup": "auth.html", "/reset": "reset.html",
@@ -132,7 +132,7 @@ class Gate:
             # must have been asked for by its real address (a number, "localhost", or the address in settings),
             # so another website cannot reach it through a made-up name that points at this machine.
             if not _own_address(req.headers.get("host", "")):
-                return await deny(403, "Open PeakCut by its own address.")
+                return await deny(403, "Open VICE CUT AI by its own address.")
             if path == "/" or path == "/reset" or path.startswith("/auth/"):
                 return await deny(303, "", redirect="/app")
             if path.startswith("/api/auth/") and path != "/api/auth/me":
@@ -365,9 +365,9 @@ def reset_page():
 
 
 LEGAL = {
-    "privacy": ("Privacy Policy", "How PeakCut collects, uses and protects your data, including Google user data, cookies and your privacy rights."),
-    "terms": ("Terms of Service", "The terms for using PeakCut, the AI clipping tool for streams and videos: accounts, availability and liability."),
-    "acceptable-use": ("Acceptable Use Policy", "What you may and may not do with PeakCut, the AI stream clipping tool."),
+    "privacy": ("Privacy Policy", "How VICE CUT AI collects, uses and protects your data, including Google user data, cookies and your privacy rights."),
+    "terms": ("Terms of Service", "The terms for using VICE CUT AI, the AI clipping tool for streams and videos: accounts, availability and liability."),
+    "acceptable-use": ("Acceptable Use Policy", "What you may and may not do with VICE CUT AI, the AI stream clipping tool."),
 }
 
 
@@ -382,9 +382,9 @@ def legal_page(request: Request):
     contact = config.CONTACT_EMAIL
     who = (f'<a href="mailto:{_h.escape(contact)}">{_h.escape(contact)}</a>' if contact
            else "the contact details on our website")
-    name = _h.escape(config.LEGAL_NAME or "PeakCut")
+    name = _h.escape(config.LEGAL_NAME or "VICE CUT AI")
     law = (f"the laws of {_h.escape(config.LEGAL_COUNTRY)}" if config.LEGAL_COUNTRY
-           else "the laws of the country where PeakCut's operator is established")
+           else "the laws of the country where VICE CUT AI's operator is established")
     out = (_LEGAL_HTML or (WEB / "legal.html").read_text(encoding="utf-8"))
     for k, v in {"{{CONTACT}}": who, "{{PAGE}}": page, "{{PAGE_PATH}}": page, "{{SITE}}": _h.escape(config.PUBLIC_URL),
                  "{{NAME}}": name, "{{LAW}}": law, "{{TITLE}}": title, "{{DESC}}": desc}.items():
@@ -1122,7 +1122,7 @@ def email_preview(request: Request, kind: str = "verify"):
     from . import mailer
     _admin(request)
     if kind == "reset":
-        page = mailer.preview("Reset your password", "Someone asked to reset the password for this PeakCut account. If that was you, choose a new one below.",
+        page = mailer.preview("Reset your password", "Someone asked to reset the password for this VICE CUT AI account. If that was you, choose a new one below.",
                               "Choose a new password", config.PUBLIC_URL + "/reset?t=example",
                               "The link works for one hour. If you didn't ask for this, ignore this email and your password stays the same.")
     else:
@@ -1137,9 +1137,9 @@ def test_email(request: Request):
     me_ = _admin(request)
     if not mailer.ready():
         raise HTTPException(400, "No email service is set up yet. Add the PEAKCUT_SMTP settings to .env first.")
-    mailer.send(me_.email, "PeakCut test email", "Your emails are working",
-                "This is a test from your PeakCut server. Account emails like this one will now reach people.",
-                "Open PeakCut", config.PUBLIC_URL + "/app", "You can ignore this message.")
+    mailer.send(me_.email, "VICE CUT AI test email", "Your emails are working",
+                "This is a test from your VICE CUT AI server. Account emails like this one will now reach people.",
+                "Open VICE CUT AI", config.PUBLIC_URL + "/app", "You can ignore this message.")
     return {"sent_to": me_.email}
 
 
@@ -1532,7 +1532,7 @@ def storage_open(request: Request):
     from . import storage
     _admin(request)
     if not _on_this_computer(request):
-        raise HTTPException(400, "The folder can only be opened on the computer PeakCut runs on.")
+        raise HTTPException(400, "The folder can only be opened on the computer VICE CUT AI runs on.")
     try:
         storage.open_folder()
     except OSError as e:
@@ -1545,7 +1545,7 @@ def storage_pick(request: Request):
     from . import storage
     _admin(request)
     if not _on_this_computer(request):
-        raise HTTPException(400, "Type the folder's path instead: a folder window can only be shown on the computer PeakCut runs on.")
+        raise HTTPException(400, "Type the folder's path instead: a folder window can only be shown on the computer VICE CUT AI runs on.")
     return {"path": storage.pick_folder()}
 
 
@@ -1656,7 +1656,7 @@ def test_alert():
         auth_problem = str(e)
     if auth_problem:
         raise HTTPException(429, auth_problem)
-    problems = alerts.send("PeakCut: test message. Alerts are working.")
+    problems = alerts.send("VICE CUT AI: test message. Alerts are working.")
     if problems:
         raise HTTPException(400, "; ".join(problems))
     return {"ok": True}
@@ -1714,9 +1714,9 @@ def admin_delete_user(request: Request, uid: str, body: dict = Body(...)):
 
 
 def main():
-    print(f"\n  PeakCut is running:  {config.PUBLIC_URL}\n")
+    print(f"\n  VICE CUT AI is running:  {config.PUBLIC_URL}\n")
     if not config.ACCOUNTS and (config.HTTPS or config.HOST not in ("127.0.0.1", "localhost", "::1")):
-        print("  Sign-in is off, so anyone who can reach this address can use PeakCut and its AI key.\n"
+        print("  Sign-in is off, so anyone who can reach this address can use VICE CUT AI and its AI key.\n"
               "  On a server other people can reach, set PEAKCUT_ACCOUNTS=1 in .env.\n", flush=True)
     if config.env("PEAKCUT_AUTO_RELOAD") == "1":
         # restart by itself whenever the server code changes (pages in web/ never need a restart)

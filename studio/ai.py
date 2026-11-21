@@ -316,7 +316,7 @@ def diagnose(e, provider_id: str | None = None, model: str | None = None, extra_
         }
     if "connect" in low or "timed out" in low or "timeout" in low or "getaddrinfo" in low or "refused" in low or "nodename" in low or "servname" in low or "nameresolution" in low or "name resolution" in low:
         return {
-            "error": f"PeakCut couldn't reach {svc}.",
+            "error": f"VICE CUT AI couldn't reach {svc}.",
             "fix": "Make sure Ollama is running locally and its address is right." if pid == "ollama" else "Check your internet connection (or custom address) and re-test.",
             "detail": detail,
             "action": "check_url",
@@ -678,7 +678,7 @@ def explain(e, provider_id: str | None = None, model: str | None = None) -> str:
     if "429" in text or "quota" in low or "rate limit" in low or "exhausted" in low:
         return f"{svc} says the key has hit its limit or has no credit left. Check the account with {svc}, or try again later."
     if "connect" in low or "timed out" in low or "timeout" in low or "getaddrinfo" in low or "refused" in low or "nodename" in low or "servname" in low or "nameresolutionerror" in low or "name resolution" in low:
-        return f"PeakCut couldn't reach {svc}. Check the internet connection" + (" and that Ollama is running." if pid == "ollama" else ".")
+        return f"VICE CUT AI couldn't reach {svc}. Check the internet connection" + (" and that Ollama is running." if pid == "ollama" else ".")
     return ""
 
 
