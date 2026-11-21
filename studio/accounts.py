@@ -24,7 +24,7 @@ _states: dict = {}   # one-time values for the connect redirects: state -> (user
 
 SECRET_KEYS = ("discord_webhook", "telegram_token")
 SETTING_DEFAULTS = {"discord_webhook": "", "telegram_token": "", "telegram_chat": "", "paused": False,
-                    "digest_hour": 8, "last_digest": "", "tour_done": False}
+                    "paused_platforms": [], "digest_hour": 8, "last_digest": "", "tour_done": False}
 
 YT_SCOPES = "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly"
 IG = "https://graph.instagram.com"
@@ -33,7 +33,7 @@ IG_UPLOAD = "https://rupload.facebook.com/ig-api-upload/v21.0"
 IG_SCOPES = "instagram_business_basic,instagram_business_content_publish"
 FB_SCOPES = "instagram_basic,instagram_content_publish,pages_show_list,pages_read_engagement,business_management"
 TT = "https://open.tiktokapis.com/v2"
-TT_SCOPES = "user.info.basic,video.publish"
+TT_SCOPES = "user.info.basic,video.publish,video.upload"
 PLATFORM_NAMES = {"youtube": "YouTube", "instagram": "Instagram", "tiktok": "TikTok"}
 
 
@@ -282,6 +282,10 @@ def save_settings(patch: dict) -> dict:
                 continue
             if k in ("paused", "tour_done"):
                 v = bool(v)
+            elif k == "paused_platforms":
+                raw = v.split(",") if isinstance(v, str) else (list(v) if isinstance(v, (list, tuple, set)) else [])
+                chosen = {str(x).strip().lower() for x in raw}
+                v = [p for p in PLATFORM_NAMES if p in chosen]
             elif k == "digest_hour":
                 v = max(0, min(23, int(v)))
             else:
@@ -577,7 +581,7 @@ def _tt_tokens(form: dict) -> dict:
 
 def _tiktok_finish(code: str) -> dict:
     tok = _tt_tokens({"code": code, "grant_type": "authorization_code", "redirect_uri": redirect_for("tiktok")})
-    if "video.publish" not in str(tok.get("scope", "")):
+    if "video.publish" not in str(tok.get("scope", "")) and "video.upload" not in str(tok.get("scope", "")):
         raise ValueError("PeakCut needs permission to post videos. Connect again and allow posting.")
     acc = {"id": f"tt_{tok['open_id']}", "platform": "tiktok", "name": "TikTok account", "added": time.time(),
            "open_id": tok["open_id"], "access_token": tok["access_token"], "refresh_token": tok["refresh_token"],
@@ -637,15 +641,31 @@ def tiktok_upload(acc, path: Path, caption: str, privacy: str = "public"):
                           "disable_stitch": False, "video_cover_timestamp_ms": 1000},
             "source_info": {"source": "FILE_UPLOAD", "video_size": size, "chunk_size": chunk, "total_chunk_count": count}},
             "Starting the TikTok post")
+
+    def init_inbox():
+        return _tt_post(acc, "/post/publish/inbox/video/init/", {
+            "source_info": {"source": "FILE_UPLOAD", "video_size": size, "chunk_size": chunk, "total_chunk_count": count}},
+            "Starting the TikTok inbox upload")
+
     note = ""
     try:
         box = init(level)
     except RuntimeError as e:
-        # A TikTok app that has not passed TikTok's review can only post privately: post privately, and say so.
-        if "unaudited" not in str(getattr(e, "code", "")) or level == "SELF_ONLY" or "SELF_ONLY" not in options:
+        # A TikTok app that has not passed TikTok's review can only post privately (or to the user's inbox if the account is public).
+        if "unaudited" not in str(getattr(e, "code", "")):
             raise
-        level, note = "SELF_ONLY", "Posted as private: this server's TikTok app hasn't passed TikTok's review yet."
-        box = init(level)
+        if level != "SELF_ONLY" and "SELF_ONLY" in options:
+            try:
+                level, note = "SELF_ONLY", "Posted as private: this server's TikTok app hasn't passed TikTok's review yet."
+                box = init(level)
+            except RuntimeError as e2:
+                if "unaudited" not in str(getattr(e2, "code", "")):
+                    raise
+                box = init_inbox()
+                note = "Sent to TikTok inbox (draft): open the TikTok app notification to publish."
+        else:
+            box = init_inbox()
+            note = "Sent to TikTok inbox (draft): open the TikTok app notification to publish."
     with path.open("rb") as f:
         for n in range(count):
             first = n * chunk
@@ -657,7 +677,7 @@ def tiktok_upload(acc, path: Path, caption: str, privacy: str = "public"):
                 raise RuntimeError(f"Uploading to TikTok failed ({r.status_code}): {r.text[:200]}")
     for _ in range(120):
         st = _tt_post(acc, "/post/publish/status/fetch/", {"publish_id": box["publish_id"]}, "Checking the TikTok post")
-        if st.get("status") == "PUBLISH_COMPLETE":
+        if st.get("status") in ("PUBLISH_COMPLETE", "SEND_TO_USER_INBOX"):
             break
         if st.get("status") == "FAILED":
             raise RuntimeError(f"TikTok did not publish the video: {st.get('fail_reason') or 'no reason given'}")
@@ -668,6 +688,7 @@ def tiktok_upload(acc, path: Path, caption: str, privacy: str = "public"):
     user = info.get("creator_username") or ""
     url = f"https://www.tiktok.com/@{user}/video/{ids[0]}" if ids and user else ""
     if note:
-        acc["detail"] = "Posts are private until this server's TikTok app is reviewed"
+        acc["detail"] = ("Drafts sent to TikTok inbox until this server's TikTok app is reviewed"
+                         if "inbox" in note else "Posts are private until this server's TikTok app is reviewed")
         _put(acc)
     return str(ids[0]) if ids else box["publish_id"], url

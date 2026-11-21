@@ -78,13 +78,18 @@ def post(url, data=None, json=None, headers=None, params=None, timeout=None, con
     if url.endswith("/post/publish/video/init/"):
         lv = json["post_info"]["privacy_level"]
         tt["init"] = json
-        if lv != "SELF_ONLY" and not tt["audited"]:
+        if not tt["audited"] and (lv != "SELF_ONLY" or tt.get("public_account")):
             return R(403, {"error": {"code": "unaudited_client_can_only_post_to_private_accounts", "message": "private only"}})
         return R(200, {"data": {"publish_id": "v_pub_1", "upload_url": "https://open-upload.tiktokapis.com/video/?upload_id=1"}, "error": {"code": "ok"}})
+    if url.endswith("/post/publish/inbox/video/init/"):
+        tt["inbox_init"] = json
+        return R(200, {"data": {"publish_id": "v_inbox_1", "upload_url": "https://open-upload.tiktokapis.com/video/?upload_id=inbox1"}, "error": {"code": "ok"}})
     if url.endswith("/post/publish/status/fetch/"):
         tt["status"] += 1
         if tt["status"] < 2:
             return R(200, {"data": {"status": "PROCESSING_UPLOAD"}, "error": {"code": "ok"}})
+        if json.get("publish_id") == "v_inbox_1":
+            return R(200, {"data": {"status": "SEND_TO_USER_INBOX"}, "error": {"code": "ok"}})
         return R(200, {"data": {"status": "PUBLISH_COMPLETE", "publicaly_available_post_id": [7300] if tt["audited"] else []}, "error": {"code": "ok"}})
     if url.endswith("/17841/media"):
         return R(200, {"id": "container1"})
@@ -127,7 +132,7 @@ check("Instagram: Instagram's own page, with publishing permission", (loc.netloc
 check("Instagram: connected, with the #_ Instagram adds to the code removed", "connected=instagram" in back.headers["location"])
 loc, back = connect(b, "tiktok")
 q = parse_qs(loc.query)
-check("TikTok: TikTok's own page, asking to post", (loc.netloc, q["client_key"][0], q["scope"][0]), ("www.tiktok.com", "awtiktokkey123", "user.info.basic,video.publish"))
+check("TikTok: TikTok's own page, asking to post", (loc.netloc, q["client_key"][0], q["scope"][0]), ("www.tiktok.com", "awtiktokkey123", "user.info.basic,video.publish,video.upload"))
 check("TikTok: connected", "connected=tiktok" in back.headers["location"])
 accs = {x["platform"]: x for x in b.get("/api/accounts").json()}
 check("all three accounts are listed with their names", (accs["youtube"]["name"], accs["instagram"]["name"], accs["tiktok"]["name"]),
@@ -178,7 +183,10 @@ with ctx.as_user(user.id):
     check("TikTok: an app not yet reviewed posts privately instead of failing", (tt["init"]["post_info"]["privacy_level"], url), ("SELF_ONLY", ""))
     check("TikTok: the whole file in one piece, with the right range", (len(uploads), uploads[0][2]["Content-Range"]), (1, "bytes 0-5999/6000"))
     check("TikTok: the account says why posts are private", "private" in accounts.get(ttacc["id"]).get("detail", ""))
-    tt.update(audited=True, status=0)
+    uploads.clear(); tt.update(audited=False, public_account=True, status=0)
+    rid_inb, url_inb = accounts.tiktok_upload(ttacc, jd / "clip01.mp4", "My caption #fyp", "public")
+    check("TikTok: public account on unaudited app falls back to inbox draft", (rid_inb, "inbox" in accounts.get(ttacc["id"]).get("detail", "")), ("v_inbox_1", True))
+    tt.update(audited=True, public_account=False, status=0)
     rid, url = accounts.tiktok_upload(ttacc, jd / "clip01.mp4", "My caption", "public")
     check("TikTok: once reviewed, public, with the video's link", (tt["init"]["post_info"]["privacy_level"], url),
           ("PUBLIC_TO_EVERYONE", "https://www.tiktok.com/@streamerclips/video/7300"))
