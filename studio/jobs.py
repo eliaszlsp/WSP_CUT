@@ -168,7 +168,9 @@ def public(job) -> dict:
     out = {k: v for k, v in job.items() if k not in HIDDEN}
     out["source"] = {k: v for k, v in job["source"].items() if k != "path"}
     jdir = Path(job["dir"]) if job.get("dir") else None
-    out["has_cache"] = bool(jdir and (jdir / "words.json").is_file())
+    has_job_src = bool(job.get("source_path") and Path(job["source_path"]).is_file())
+    has_url_src = bool((job.get("source") or {}).get("type") == "url" and (job.get("source") or {}).get("url"))
+    out["has_cache"] = bool(jdir and (jdir / "words.json").is_file() and (has_job_src or has_url_src))
     out["clips"] = [
         {
             **{k: v for k, v in c.items() if k not in ("src", "fixed_words", "fixed_for")},
@@ -660,6 +662,7 @@ def _piece_again(job, clip):
     if src.get("type") != "url" or not src.get("url"):
         raise RuntimeError("The original video is no longer here, so this clip can't be made again. Add the video again.")
     d = Path(job["dir"])
+    (d / "clips").mkdir(parents=True, exist_ok=True)
     want = max(0.0, clip["start"] - PAD)
     until = clip["end"] + PAD if not job.get("duration") else min(job["duration"], clip["end"] + PAD)
     try:
@@ -925,7 +928,10 @@ def _run_job(job):
             if audio is not None and len(audio):
                 _fetch_piece(job, clip, audio)
             else:
-                _piece_again(job, clip)
+                try:
+                    _piece_again(job, clip)
+                except Exception as e:  # noqa: BLE001
+                    clip.update(status="error", error=safe.friendly(e, 250))
         if audio is not None and clip["status"] != "error" and clip.get("captions", True) and yt and yt[1].lower().startswith(("en", "pt")):
             # The clip was found with YouTube's transcript. What is shown on screen comes from our own model,
             # run on just this clip: full punctuation, nothing blanked out, timings to the word.
@@ -1490,6 +1496,7 @@ def regenerate_thumb(jid: str, cid: str, text: str | None = None, mode: str | No
 
     using = "file"
     src_file = None
+    temp_src_for_drive = False
     if clip.get("src") and Path(clip["src"]).is_file():
         src_file = Path(clip["src"])
         using = "src"
@@ -1504,6 +1511,7 @@ def regenerate_thumb(jid: str, cid: str, text: str | None = None, mode: str | No
         if clip.get("src") and Path(clip["src"]).is_file():
             src_file = Path(clip["src"])
             using = "src"
+            temp_src_for_drive = bool(clip.get("drive"))
     if not src_file or not src_file.is_file():
         raise ValueError("No video frame source is available on disk to generate this thumbnail.")
 
@@ -1559,6 +1567,14 @@ def regenerate_thumb(jid: str, cid: str, text: str | None = None, mode: str | No
     clip["cover"] = f"{cid}.jpg"
     clip["peak_t"] = round(target_abs, 2)
     clip["version"] = int(clip.get("version", 0)) + 1
+    if temp_src_for_drive and src_file:
+        try:
+            src_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+        clip.pop("src", None)
+        clip.pop("src_offset", None)
+        clip.pop("src_end", None)
     save(job)
     return job
 
