@@ -288,6 +288,17 @@ def rebalance_account(account_id: str, gap_min: int = 90, cap: int = 12):
         _mirror(p)
 
 
+def rebalance_platform(platform: str):
+    """Reschedule scheduled posts on every connected account for one platform using its current effective gap and cap."""
+    accs = [a for a in accounts._all() if a.get("platform") == platform]
+    if not accs:
+        return
+    base_gap = 90
+    base_cap = 12
+    for acc in accs:
+        rebalance_account(acc["id"], gap_min=_eff_gap(platform, base_gap), cap=_eff_cap(platform, base_cap))
+
+
 def enqueue(job, clip, account_ids, now=False) -> list:
     if _is_music_blocked_long(clip):
         return []
@@ -309,8 +320,9 @@ def enqueue(job, clip, account_ids, now=False) -> list:
             if any(p["job"] == job["id"] and p["clip"] == clip["id"] and p["account"] == aid
                    and p["status"] in OPEN + ("posted",) for p in _mine()):
                 continue  # never post the same clip to the same account twice
-            eff_gap = platform_gap(acc["platform"], c["post_gap_min"])
-            due = time.time() if now else _next_slot(aid, eff_gap, c["daily_cap"], acc["platform"], is_short=is_short)
+            eff_gap = _eff_gap(acc["platform"], c["post_gap_min"])
+            eff_cap = _eff_cap(acc["platform"], c["daily_cap"])
+            due = time.time() if now else _next_slot(aid, eff_gap, eff_cap, acc["platform"], is_short=is_short)
             p = {"id": secrets.token_hex(8), "user": ctx.uid(), "job": job["id"], "clip": clip["id"], "creator": job["creator"],
                  "account": aid, "account_name": acc["name"], "platform": acc["platform"], "status": "scheduled",
                  "due_at": due, "created": time.time(), "made_at": clip.get("rendered_at") or clip.get("made_at") or time.time(),
@@ -326,7 +338,8 @@ def enqueue(job, clip, account_ids, now=False) -> list:
     if made and not now:
         c = creators.get(job["creator"]) or creators.DEFAULTS
         for aid in {p["account"] for p in made}:
-            rebalance_account(aid, gap_min=c["post_gap_min"], cap=c["daily_cap"])
+            plat = (accounts.get(aid) or {}).get("platform") or ""
+            rebalance_account(aid, gap_min=_eff_gap(plat, c["post_gap_min"]), cap=_eff_cap(plat, c["daily_cap"]))
     return made
 
 
@@ -366,21 +379,72 @@ def on_clip_ready(job, clip):
         creators.log(c["id"], f"Queued for {len(made)} account(s): {clip.get('title') or clip.get('hook')}")
 
 
-def _caption(clip, creator):
-    desc = (clip.get("description") or "").strip()
-    is_long = clip.get("clip_kind") == "long" or clip.get("format") == "16:9" or (clip.get("end", 0) - clip.get("start", 0)) > 180
-    if desc and "?" not in desc and "comenta" not in desc.lower():
-        cta = "Qual detalhe mais chamou sua atenção? Deixe nos comentários!" if is_long else "O que você achou dessa cena? Comenta aí!"
-        desc = f"{desc}\n{cta}"
-    elif not desc:
-        desc = "Qual detalhe mais chamou sua atenção? Deixe nos comentários!" if is_long else "O que você achou dessa cena? Comenta aí!"
+def _plat_override(platform: str) -> dict:
+    if not platform or ctx.uid_or_none() is None:
+        return {}
+    raw = accounts.settings().get("platform_prefs") or {}
+    return dict(raw.get(platform) or {}) if isinstance(raw.get(platform), dict) else {}
+
+
+def _plat_merged(platform: str) -> dict:
+    base = accounts.PLATFORM_PREF_DEFAULTS.get(platform, {})
+    return {**base, **_plat_override(platform)}
+
+
+def _eff_gap(platform: str, creator_gap: int) -> int:
+    ov = _plat_override(platform)
+    g = ov["gap_min"] if "gap_min" in ov and ov["gap_min"] is not None else creator_gap
+    return platform_gap(platform, g)
+
+
+def _eff_cap(platform: str, creator_cap: int) -> int:
+    ov = _plat_override(platform)
+    return int(ov["daily_cap"]) if "daily_cap" in ov and ov["daily_cap"] is not None else creator_cap
+
+
+def _eff_min_score(platform: str, creator: dict, is_long: bool = False) -> int:
+    ov = _plat_override(platform)
+    if "min_score" in ov and ov["min_score"] is not None:
+        return int(ov["min_score"])
+    return int(creator.get("long_min_score", 70) if is_long else creator.get("post_min_score", 80))
+
+
+def _caption_tags(clip: dict, platform: str = "") -> list[str]:
     raw_tags = list(clip.get("hashtags") or [])
     for core_tag in ("GTA6", "GTAVI", "GTA6Brasil", "ViceCity"):
-        if any(t.lower() in ("gta6", "gtavi", "vicecity", "gta6game") for t in raw_tags):
-            if core_tag.lower() not in {t.lower() for t in raw_tags}:
+        if any(str(t).lower() in ("gta6", "gtavi", "vicecity", "gta6game") for t in raw_tags):
+            if core_tag.lower() not in {str(t).lower() for t in raw_tags}:
                 raw_tags.append(core_tag)
-    tags = " ".join("#" + h for h in raw_tags[:10] if h)
-    return "\n\n".join(x for x in (desc, tags, creator.get("post_footer", "")) if x)
+    ov = _plat_override(platform) if platform else {}
+    if ov.get("hashtags"):
+        for extra in str(ov["hashtags"]).split(","):
+            et = extra.strip().lstrip("#")
+            if et and et.lower() not in {str(t).lower() for t in raw_tags}:
+                raw_tags.append(et)
+    clean_tags = []
+    for h in raw_tags:
+        s = str(h).strip().lstrip("#")
+        if s and s.lower() not in {x.lower() for x in clean_tags}:
+            clean_tags.append(s)
+        if len(clean_tags) >= 10:
+            break
+    return clean_tags
+
+
+def _caption(clip, creator, platform: str = ""):
+    desc = (clip.get("description") or "").strip()
+    is_long = clip.get("clip_kind") == "long" or clip.get("format") == "16:9" or (clip.get("end", 0) - clip.get("start", 0)) > 180
+    ov = _plat_override(platform) if platform else {}
+    cta = str(ov.get("cta") or "").strip() or (
+        "Qual detalhe mais chamou sua atenção? Deixe nos comentários!" if is_long else "O que você achou dessa cena? Comenta aí!"
+    )
+    if desc and "?" not in desc and "comenta" not in desc.lower():
+        desc = f"{desc}\n{cta}"
+    elif not desc:
+        desc = cta
+    tags = " ".join("#" + h for h in _caption_tags(clip, platform))
+    footer = str(ov.get("footer") or "").strip() or (creator.get("post_footer", "") if creator else "")
+    return "\n\n".join(x for x in (desc, tags, footer) if x)
 
 
 def _post(p):
@@ -400,19 +464,23 @@ def _post(p):
         if not path or not path.is_file():
             raise RuntimeError("The clip file is no longer available.")
         creator = creators.get(job["creator"]) or dict(creators.DEFAULTS, name="clips")
-        title, cap = clip.get("title") or clip.get("hook") or "Clip", _caption(clip, creator)
+        plat = acc["platform"]
+        title, cap = clip.get("title") or clip.get("hook") or "Clip", _caption(clip, creator, plat)
+        privacy = _plat_override(plat).get("privacy") or creator["privacy"]
         is_short = (clip.get("clip_kind") != "long") and (clip.get("format") != "16:9") and ((clip.get("end", 0) - clip.get("start", 0)) <= 180)
         if not is_short and clip.get("has_music"):
             raise RuntimeError("Vídeo longo bloqueado: contém música (>5s); permitido apenas em Shorts/Reels.")
-        if acc["platform"] == "youtube":
+        if plat == "youtube":
             yt_desc = (cap + "\n\n#Shorts") if is_short else cap
             thumb_path = (Path(job["dir"]) / "clips" / Path(str(clip.get("cover") or "")).name) if (not is_short and clip.get("cover")) else None
-            rid, url = accounts.youtube_upload(acc, path, title, yt_desc, clip.get("hashtags", []), creator["privacy"],
+            rid, url = accounts.youtube_upload(acc, path, title, yt_desc, _caption_tags(clip, plat)[:15], privacy,
                                                is_short=is_short, thumb_path=thumb_path)
-        elif acc["platform"] == "instagram":
-            rid, url = accounts.instagram_upload(acc, path, f"{title}\n\n{cap}", job["id"] if fname else "", clip_name=fname)
-        elif acc["platform"] == "tiktok":
-            rid, url = accounts.tiktok_upload(acc, path, f"{title}\n\n{cap}", creator["privacy"])
+        elif plat == "instagram":
+            cov_name = Path(str(clip.get("cover") or "")).name if clip.get("cover") else ""
+            rid, url = accounts.instagram_upload(acc, path, f"{title}\n\n{cap}", job["id"] if fname else "",
+                                                 clip_name=fname, cover_name=cov_name)
+        elif plat == "tiktok":
+            rid, url = accounts.tiktok_upload(acc, path, f"{title}\n\n{cap}", privacy)
         else:
             raise RuntimeError("That kind of account is no longer supported.")
         p.update(status="posted", posted_at=time.time(), remote_id=rid, url=url, error=None)
@@ -501,7 +569,9 @@ def _run():
                         continue
                     if not p.get("manual_now"):
                         c = creators.get(p.get("creator")) or creators.DEFAULTS
-                        eff_gap = platform_gap(p.get("platform", ""), c["post_gap_min"])
+                        plat_k = p.get("platform", "")
+                        eff_gap = _eff_gap(plat_k, c["post_gap_min"])
+                        eff_cap = _eff_cap(plat_k, c["daily_cap"])
                         mine_acc = [x for x in _mine() if x["account"] == p["account"] and x["status"] in ("posting", "posted")]
                         last_t = max((x.get("posted_at") or x["due_at"] for x in mine_acc), default=0)
                         now_t = time.time()
@@ -512,7 +582,7 @@ def _run():
                             if _is_short_post(x) and _period_info(x.get("posted_at") or x["due_at"])[0] == cur_pk
                         ) if is_short else 0
                         if (last_t and now_t - last_t < eff_gap * 60 - 5) or (is_short and period_hits >= SHORT_PERIOD_CAP):
-                            nxt = _next_slot(p["account"], eff_gap, c["daily_cap"], p.get("platform", ""), is_short=is_short)
+                            nxt = _next_slot(p["account"], eff_gap, eff_cap, plat_k, is_short=is_short)
                             with _lock:
                                 if p["status"] == "scheduled":
                                     p["due_at"] = max(now_t + 60, nxt)
@@ -583,21 +653,22 @@ def overview() -> dict:
     for c in all_cs:
         js = [j for j in all_js if j["creator"] == c["id"]]
         clips = [k for j in js for k in j["clips"] if k.get("status") == "done"]
-        ps = [p for p in _posts if p["creator"] == c["id"]]
-        views = sum(p["views"] or 0 for p in ps)
+        ps = [p for p in _posts if p.get("creator") == c["id"]]
+        views = sum(p.get("views") or 0 for p in ps)
         rows.append({
             "id": c["id"], "name": c["name"],
             "state": "recording" if live.active_for(c["id"]) else "waiting" if c["auto_watch"] and c["channel"] else "idle",
             "autopost": c["autopost"] and bool(c["accounts"]),
             "clips_today": sum(1 for k in clips if _day(k.get("made_at", 0)) == today), "clips_total": len(clips),
-            "posted_today": sum(1 for p in ps if p["status"] == "posted" and _day(p["posted_at"]) == today),
-            "posted_total": sum(1 for p in ps if p["status"] == "posted"),
-            "queued": sum(1 for p in ps if p["status"] in OPEN), "failed": sum(1 for p in ps if p["status"] == "failed"),
+            "posted_today": sum(1 for p in ps if p.get("status") == "posted" and _day(p.get("posted_at") or p.get("due_at") or 0) == today),
+            "posted_total": sum(1 for p in ps if p.get("status") == "posted"),
+            "queued": sum(1 for p in ps if p.get("status") in OPEN), "failed": sum(1 for p in ps if p.get("status") == "failed"),
             "views": views, "earnings": round(views / 1000 * c["rate_per_1k"], 2)})
     names = {c["id"]: c["name"] for c in all_cs}
+    creator_map = {c["id"]: c for c in all_cs}
     clip_meta = {(j["id"], k["id"]): (j, k) for j in all_js for k in j.get("clips", [])}
-    queue = sorted((p for p in _posts if p["status"] in OPEN), key=lambda p: p["due_at"])
-    done = sorted((p for p in _posts if p["status"] in ("posted", "failed")), key=lambda p: -(p.get("posted_at") or p["due_at"]))[:15]
+    queue = sorted((p for p in _posts if p.get("status") in OPEN), key=lambda p: p.get("due_at", 0))
+    done = sorted((p for p in _posts if p.get("status") in ("posted", "failed")), key=lambda p: -(p.get("posted_at") or p.get("due_at") or 0))[:40]
     show = []
     for p in queue + done:
         j_obj, k_obj = clip_meta.get((p.get("job"), p.get("clip")), ({}, {}))
@@ -606,6 +677,14 @@ def overview() -> dict:
         dur = round(max(0.0, float((k_obj.get("end") or 0) - (k_obj.get("start") or 0))), 1)
         tags_lower = {str(t).lower() for t in (k_obj.get("hashtags") or [])}
         is_opt = bool((p.get("score") or k_obj.get("score") or 0) >= 82 and ("gta6brasil" in tags_lower or k_obj.get("thumb_text")))
+        plat = p.get("platform", "")
+        cr_obj = creator_map.get(p.get("creator")) or creators.DEFAULTS
+        title_txt = p.get("title") or k_obj.get("title") or k_obj.get("hook") or "Clip"
+        cap_body = _caption(k_obj, cr_obj, plat) if k_obj else ""
+        cap_ready = f"{title_txt}\n\n{cap_body}".strip() if cap_body else title_txt
+        tags_ready = " ".join("#" + h for h in _caption_tags(k_obj, plat)) if k_obj else ""
+        cov_name = Path(str(k_obj.get("cover") or "")).name if k_obj.get("cover") else ""
+        cov_url = f"/media/{p['job']}/{cov_name}" if (cov_name and p.get("job")) else ""
         show.append({
             **{k: v for k, v in p.items() if k != "user"},
             "creator_name": names.get(p["creator"], ""),
@@ -615,6 +694,13 @@ def overview() -> dict:
             "queued_at": queued_ts,
             "duration": dur,
             "optimized": is_opt,
+            "hook": k_obj.get("hook") or "",
+            "thumb_text": k_obj.get("thumb_text") or "",
+            "cover_url": cov_url,
+            "cover_dl": (cov_url + "?download=1") if cov_url else "",
+            "caption_ready": cap_ready,
+            "hashtags_ready": tags_ready,
+            "inbox_mode": bool(plat == "tiktok" and p.get("status") == "posted" and "v_inbox" in str(p.get("remote_id") or "")),
         })
     # last 14 days, oldest first, for the home graph
     days = [_day(time.time() - 86400 * i) for i in range(13, -1, -1)]
@@ -625,12 +711,15 @@ def overview() -> dict:
             if k.get("status") == "done" and d in made:
                 made[d] += 1
     for p in _posts:
-        if p["status"] == "posted" and _day(p["posted_at"]) in posted:
-            posted[_day(p["posted_at"])] += 1
-            views[_day(p["posted_at"])] += p["views"] or 0
+        pt = p.get("posted_at") or p.get("due_at") or 0
+        if p.get("status") == "posted" and _day(pt) in posted:
+            posted[_day(pt)] += 1
+            views[_day(pt)] += p.get("views") or 0
     daily = [{"day": d, "clips": made[d], "posted": posted[d], "views": views[d]} for d in days]
     st = accounts.settings()
     return {"paused": bool(st.get("paused")), "paused_platforms": list(st.get("paused_platforms") or []),
+            "platform_prefs": accounts.platform_prefs(st),
+            "accounts": accounts.list_accounts(),
             "creators": rows, "posts": show, "daily": daily,
             "alerts": alerts.configured(), "recording": len(live.active_mine())}
 

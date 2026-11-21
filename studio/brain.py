@@ -104,8 +104,8 @@ Rules:
 - hook: 3 to 6 explosive ALL CAPS words shown as the big on-screen banner during the first 5-10 seconds ("ESPERA ATÉ VER O FINAL!", "ELE TENTOU O IMPOSSÍVEL!", "NINGUÉM SABIA DESSE SEGREDO!"). Must lock attention immediately.
 - thumb_text: 2 to 4 magnetic clickbait ALL CAPS words for the thumbnail collage ("NÃO PODE SER?!", "SEGREDO PROIBIDO!", "IA SURTOU!", "DEU MUITO RUIM!") that complement the title without repeating it.
 - title: at most 70 characters, high-CTR viral clickbait / curiosity-gap style (open loop, forbidden/hidden secret, extreme consequence, or shocking discovery) with 1-2 ALL CAPS power words and punchy punctuation (?! or !) without spoiling the ending (e.g. "O QUE ACONTECE SE VOCÊ FIZER ISSO NO GTA 6?!", "ELE DESCOBRIU O LUGAR PROIBIDO E O JOGO REAGIU ASSIM!"). Avoid generic "STREAMER REAGE À..." clichés; verify flawless spelling and accents.
-- description: one or two punchy sentences plus a short question inviting viewers to comment about the scene.
-- hashtags: 5 high-search tags without the # sign.
+- description: one or two punchy sentences written with high-search SEO keywords people actually search for (game name, character, mechanic/event) followed by a short question inviting viewers to comment about the scene.
+- hashtags: 6 to 8 high-search tags without the # sign mixing broad discovery tags and specific scene/character tags.
 - highlight_words: 3 to 6 single words spoken in the clip that carry the punch.
 - {lang_rule}
 - category: one of mechanic, discovery, funny, fail, clutch, rage, shock, take, story, other.
@@ -488,8 +488,8 @@ Rules:
 - CRITICAL 5-10 SECOND HOOK RULE: The FIRST 5 to 10 seconds MUST open immediately on a high-tension conflict, shocking revelation, mission crisis, or unbelievable curiosity hook (ZERO slow wandering, menus, stream-tech/audio troubleshooting, or dead air in the first 10 seconds) and end at a complete sentence after the payoff.
 - score: 0-100, how strong the full episode is for YouTube.
 - title: at most 70 characters, magnetic high-CTR viral clickbait YouTube title using curiosity gap, high stakes, or hidden secret (with 1-2 ALL CAPS power words and ?! or !) naming the concrete Mission or Surprising Mechanic/Bug (avoid generic "STREAMER REAGE" clichés; flawless spelling).
-- description: two sentences summarizing the episode plus a concrete question asking viewers what they noticed in the mission.
-- hashtags: 5 high-search tags without the # sign.
+- description: two sentences packed with natural search SEO keywords summarizing the episode plus a concrete question asking viewers what they noticed in the mission.
+- hashtags: 6 to 8 high-search tags without the # sign mixing broad game tags and mission-specific tags.
 - thumb_text: 2 to 4 explosive clickbait ALL CAPS words for the YouTube collage thumbnail (e.g. "NÃO PODE SER?!", "FINAL ABSURDO!", "SEGREDO PROIBIDO!") that complement the title.
 - peak_t: timestamp in seconds inside [start, end] of the single biggest reaction/climax for the thumbnail frame.
 - {lang_rule}

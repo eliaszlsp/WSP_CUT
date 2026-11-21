@@ -434,6 +434,29 @@ img.av{object-fit:cover}
 .steps{display:flex;flex-direction:column;gap:8px}
 .step{display:flex;gap:12px;align-items:center;width:100%;text-align:left;padding:12px;border-radius:var(--r);background:var(--muted);border:0;cursor:pointer}
 .step:active{background:var(--line)}
+.ov-acts{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.btn.plat-paused{background:var(--bad-soft);border-color:#F0B6B6;color:var(--bad)}
+.btn.plat-paused:hover{background:#FADDE0;border-color:#E5A0A0}
+.ov-filters{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px;padding:10px 12px;border-radius:10px;background:var(--muted)}
+.ov-filters select{width:auto;min-width:140px;height:34px;font-size:13px;padding:0 10px;background:#fff}
+.ov-filters .ov-cnt{margin-left:auto;font-size:12px;color:var(--dim);white-space:nowrap}
+.plat-chips{display:flex;flex-wrap:wrap;gap:6px}
+.plat-chip{display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:8px;border:1px solid var(--line);background:#fff;font-size:12px}
+.plat-chip b{font-weight:600;color:var(--brand-ink)}
+.plat-chip .btn.sm{height:24px;padding:0 8px;font-size:11px}
+.ov-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;padding-top:12px;border-top:1px solid var(--line);margin-top:4px;font-size:12px;color:var(--dim)}
+.plat-list{display:flex;flex-direction:column;gap:12px}
+.plat-row{display:grid;grid-template-columns:132px minmax(0,1fr);gap:14px;padding:14px;border:1px solid var(--line);border-radius:var(--r);background:#fff;align-items:start}
+.plat-row.wide-thumb{grid-template-columns:196px minmax(0,1fr)}
+.plat-thumb{position:relative;border-radius:10px;overflow:hidden;background:#1E1612;aspect-ratio:9/16;border:1px solid var(--line)}
+.plat-row.wide-thumb .plat-thumb{aspect-ratio:16/9}
+.plat-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.plat-thumb .du{position:absolute;right:6px;bottom:6px;background:rgba(20,12,8,.84);color:#fff;font-size:11px;font-weight:600;padding:1px 6px;border-radius:6px}
+.plat-ref{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px}
+.plat-hook{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:8px;background:var(--brand-soft);color:var(--brand-ink);font-size:12px;font-weight:700}
+.plat-capbox{width:100%;min-height:92px;font-size:12.5px;line-height:1.45;background:var(--muted);border:1px solid var(--line);border-radius:10px;padding:9px 11px;color:var(--text);font-family:inherit}
+.plat-acts{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;align-items:center}
+@media (max-width:640px){.plat-row,.plat-row.wide-thumb{grid-template-columns:1fr}.plat-thumb{max-width:150px}}
 .set-layout{display:grid;grid-template-columns:240px minmax(0,1fr);gap:32px;align-items:start}
 .set-nav{position:sticky;top:76px;display:flex;flex-direction:column;gap:2px}
 .set-link{display:flex;gap:12px;align-items:flex-start;padding:10px 12px;border-radius:10px;color:var(--dim);text-decoration:none;transition:background-color .15s ease,color .15s ease}
@@ -1087,7 +1110,8 @@ function startTour() {
 
 /* ============================================================ state */
 const S = {status:{styles:{}, layouts:{}}, jobs:[], creators:[], accounts:[], overview:null, settings:null,
-           view:"overview", ctab:"clips"};
+           view:"overview", ctab:"clips",
+           ov:{creator:"", platform:"", status:"", format:"", group:false, limit:60}};
 const D = {jid:null, cid:null, sig:""};
 const creatorId = () => S.view.startsWith("c:") ? S.view.slice(2) : null;
 const creator = () => S.creators.find(c => c.id === creatorId());
@@ -1096,25 +1120,25 @@ const jobOf = id => S.jobs.find(j => j.id === id);
 /* ============================================================ shell */
 function aiStatePill(st, prefix) {
   const pre = prefix ? esc(prefix) + ": " : "";
-  if (st === "testing") return `<span class="pill brand"><i class="btn-spin"></i>${pre}Testing…</span>`;
-  if (st === "queued") return `<span class="pill">${pre}Queued</span>`;
-  if (st === "operational") return `<span class="pill ok">${ic("check")}${pre}Operational</span>`;
-  if (st === "error") return `<span class="pill bad">${ic("warn")}${pre}Failed</span>`;
-  if (st === "untested") return `<span class="pill warn">${pre}Not tested yet</span>`;
-  if (st === "incomplete") return `<span class="pill">${pre}Needs setup</span>`;
+  if (st === "testing") return `<span class="pill brand"><i class="btn-spin"></i>${pre}Testando…</span>`;
+  if (st === "queued") return `<span class="pill">${pre}Na fila</span>`;
+  if (st === "operational") return `<span class="pill ok">${ic("check")}${pre}Operacional</span>`;
+  if (st === "error") return `<span class="pill bad">${ic("warn")}${pre}Falhou</span>`;
+  if (st === "untested") return `<span class="pill warn">${pre}Não testado</span>`;
+  if (st === "incomplete") return `<span class="pill">${pre}Precisa configurar</span>`;
   return "";
 }
 function aiCard() {
   const k = S.status.ai; if (!k) return "";
-  const fb = k.ready && k.fallback_provider ? ` · Fallback: ${k.fallback_provider}` : "";
-  const badges = k.ready ? `<div class="row" style="gap:6px;flex-wrap:wrap;margin:4px 0 8px">${aiStatePill(k.main_state || "untested", "Main")}${k.fallback_provider ? aiStatePill(k.fallback_state || "untested", "Fallback") : ""}</div>` : "";
-  return `<div class="card ai-home"><h2>AI</h2>
-    <div class="ai-big">${k.ready ? esc(k.provider || "Ready") : "Not set up"}</div>
-    <p class="ai-sub">${k.ready ? esc((k.model || "") + fb) : "Clips are picked by loudness until an AI key is added."}</p>
+  const fb = k.ready && k.fallback_provider ? ` · Reserva: ${k.fallback_provider}` : "";
+  const badges = k.ready ? `<div class="row" style="gap:6px;flex-wrap:wrap;margin:4px 0 8px">${aiStatePill(k.main_state || "untested", "Principal")}${k.fallback_provider ? aiStatePill(k.fallback_state || "untested", "Reserva") : ""}</div>` : "";
+  return `<div class="card ai-home"><h2>IA</h2>
+    <div class="ai-big">${k.ready ? esc(k.provider || "Pronta") : "Não configurada"}</div>
+    <p class="ai-sub">${k.ready ? esc((k.model || "") + fb) : "Os clipes são escolhidos pelo volume do áudio até adicionar uma chave de IA."}</p>
     ${badges}
-    <div class="ai-stats"><div><b>${(k.today_calls || 0).toLocaleString()}</b><span>AI calls today</span></div>
-      <div><b>${fmtK(k.today_tokens)}</b><span>Tokens today</span></div></div>
-    <div class="row">${!k.ready && S.status.user?.is_admin ? `<button class="btn primary" data-act="go" data-v="settings" data-tab="ai">${ic("plus")}Add AI key</button>` : ""}<button class="btn" data-act="go" data-v="usage">View usage ${ic("arrowr")}</button></div></div>`;
+    <div class="ai-stats"><div><b>${(k.today_calls || 0).toLocaleString()}</b><span>Chamadas de IA hoje</span></div>
+      <div><b>${fmtK(k.today_tokens)}</b><span>Tokens hoje</span></div></div>
+    <div class="row">${!k.ready && S.status.user?.is_admin ? `<button class="btn primary" data-act="go" data-v="settings" data-tab="ai">${ic("plus")}Adicionar chave de IA</button>` : ""}<button class="btn" data-act="go" data-v="usage">Ver uso ${ic("arrowr")}</button></div></div>`;
 }
 const PLAT = {
   youtube: {name: "YouTube", bg: "#FF0000", fg: "#fff", hint: "https://www.youtube.com/@name",
@@ -1181,7 +1205,7 @@ function meAvatar(u) {
   return `<span class="avatar me-pic" style="background:linear-gradient(135deg,${a},${b});color:#fff">${esc((u.name || "?")[0].toUpperCase())}</span>`;
 }
 const NT_ICON = {live: "radio", clips: "scissors", post: "warn", fail: "warn", account: "user", feedback: "chat"};
-const ago = t => { const s = Date.now() / 1000 - t; return s < 60 ? "just now" : s < 3600 ? Math.floor(s / 60) + " min ago" : s < 86400 ? Math.floor(s / 3600) + " h ago" : new Date(t * 1000).toLocaleDateString([], {day: "numeric", month: "short"}); };
+const ago = t => { const s = Date.now() / 1000 - t; return s < 60 ? "agora" : s < 3600 ? "há " + Math.floor(s / 60) + " min" : s < 86400 ? "há " + Math.floor(s / 3600) + " h" : new Date(t * 1000).toLocaleDateString("pt-BR", {day: "numeric", month: "short"}); };
 function closePops(except) { ["bellpop", "acctpop"].forEach(id => { const p = $("#" + id); if (p !== except && !p.hidden) { p.classList.remove("open"); setTimeout(() => { if (!p.classList.contains("open")) p.hidden = true; }, 180); } });
   $$('[data-act="acctmenu"]').forEach(b => b.setAttribute("aria-expanded", String(except?.id === "acctpop"))); }
 function openPop(p, anchor) {
@@ -1195,16 +1219,16 @@ function openPop(p, anchor) {
 async function openBell() {
   const p = $("#bellpop");
   if (!p.hidden) return closePops();
-  p.innerHTML = `<div class="pop-head"><h3>Notifications</h3></div><div class="pop-empty">Loading…</div>`;
+  p.innerHTML = `<div class="pop-head"><h3>Notificações</h3></div><div class="pop-empty">Carregando…</div>`;
   openPop(p, $("[data-act=bell]"));
   try {
     const d = await api("/api/notifications");
-    p.innerHTML = `<div class="pop-head"><h3>Notifications</h3>${d.unread ? `<button data-act="bellread">Mark all as read</button>` : ""}</div>
+    p.innerHTML = `<div class="pop-head"><h3>Notificações</h3>${d.unread ? `<button data-act="bellread">Marcar lidas</button>` : ""}</div>
       ${d.items.length ? `<div class="pop-list">${d.items.map(n => `<button class="nt k-${esc(n.kind)} ${n.read ? "" : "new"}" data-act="ntgo" data-link="${esc(n.link)}">
         <i>${ic(NT_ICON[n.kind] || "bell")}</i><span class="tx"><b>${esc(n.title)}</b>${n.body ? `<span>${esc(n.body)}</span>` : ""}<small>${ago(n.t)}</small></span></button>`).join("")}</div>`
-        : `<div class="pop-empty">${ic("bell")}Nothing yet. Recordings, finished clips and posts that need a look show up here.</div>`}`;
+        : `<div class="pop-empty">${ic("bell")}Nada por aqui ainda. Gravações, clipes prontos e avisos de postagem aparecem aqui.</div>`}`;
     if (d.unread) setTimeout(markRead, 1500);
-  } catch (e) { p.innerHTML = `<div class="pop-head"><h3>Notifications</h3></div><div class="pop-empty">${esc(e.message)}</div>`; }
+  } catch (e) { p.innerHTML = `<div class="pop-head"><h3>Notificações</h3></div><div class="pop-empty">${esc(e.message)}</div>`; }
 }
 async function markRead() { try { await send("/api/notifications/read"); S.status.unread = 0; drawShell(); } catch {} }
 function openAcct() {
@@ -1213,8 +1237,8 @@ function openAcct() {
   const u = S.status.user;
   const on = S.status.accounts !== false;
   p.innerHTML = `${on ? `<div class="who2"><b>${esc(u.name)}</b><span>${esc(u.email)}</span></div>` : ""}
-    <button data-act="go" data-v="settings">${ic("cog")}Settings</button><button data-act="go" data-v="usage">${ic("chart")}AI usage</button><button data-act="tour">${ic("play")}Take the tour</button>${S.status.links?.follow ? `<button data-act="feedback">${ic("chat")}Send feedback</button>` : ""}
-    ${on ? `<button class="danger" data-act="logout">${ic("signout")}Sign out</button>` : ""}`;
+    <button data-act="go" data-v="settings">${ic("cog")}Configurações</button><button data-act="go" data-v="usage">${ic("chart")}Uso de IA</button><button data-act="tour">${ic("play")}Fazer tour</button>${S.status.links?.follow ? `<button data-act="feedback">${ic("chat")}Enviar feedback</button>` : ""}
+    ${on ? `<button class="danger" data-act="logout">${ic("signout")}Sair</button>` : ""}`;
   openPop(p, $("[data-act=acctmenu]"));
 }
 document.addEventListener("click", e => { if (!e.target.closest(".pop, [data-act=bell], [data-act=acctmenu]")) closePops(); });
@@ -1278,7 +1302,7 @@ function updateHow() {
   d.onclose = () => { if (d.returnValue === "later") { try { localStorage.setItem("peakcut_update_seen", up.latest); } catch {} drawShell(); } };
   d.returnValue = "ok"; d.showModal();
 }
-function greeting() { const h = new Date().getHours(); return h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening"; }
+function greeting() { const h = new Date().getHours(); return h < 12 ? "Bom dia" : h < 18 ? "Boa tarde" : "Boa noite"; }
 let lastInd = null;
 addEventListener("resize", () => { lastInd = null; const i = $("#utabs .ind"); if (i) i.remove(); moveInd(); });   // where the orange pill was, so it can slide from there to the new tab
 function moveInd() {
@@ -1294,63 +1318,77 @@ function moveInd() {
   lastInd = {x, w};
 }
 function drawShell() {  const nav = (v, icon, label, extra = "") => `<button class="nav-item ${S.view === v ? "on" : ""}" data-act="go" data-v="${esc(v)}" title="${esc(label)}">${icon}<span class="label">${esc(label)}</span>${extra}</button>`;
-  put($("#nav"), nav("overview", navIc("home", "overview"), "Home") +
-    nav("library", navIc("film", "library"), "All videos", (() => { const w = S.jobs.filter(j => ["queued", "running"].includes(j.status)).length;
-      return w ? `<span class="working" title="${w} working now"><i></i>${w} working</span>` : S.jobs.length ? `<span class="count">${S.jobs.length}</span>` : ""; })()) +
-    `<h4><span>Creators</span></h4>` +
+  const platCnt = pl => (S.overview?.posts || []).filter(p => p.platform === pl && p.status === "scheduled").length;
+  const platTag = pl => { const n = platCnt(pl); return n ? `<span class="count">${n > 99 ? "99+" : n}</span>` : ""; };
+  put($("#nav"), nav("overview", navIc("home", "overview"), "Início") +
+    nav("library", navIc("film", "library"), "Todos os vídeos", (() => { const w = S.jobs.filter(j => ["queued", "running"].includes(j.status)).length;
+      return w ? `<span class="working" title="${w} em andamento agora"><i></i>${w} ativos</span>` : S.jobs.length ? `<span class="count">${S.jobs.length}</span>` : ""; })()) +
+    `<h4><span>Plataformas</span></h4>` +
+    nav("tiktok", ic("video"), "TikTok", platTag("tiktok")) +
+    nav("youtube", ic("play"), "YouTube", platTag("youtube")) +
+    nav("instagram", ic("instagram"), "Instagram", platTag("instagram")) +
+    `<h4><span>Criadores</span></h4>` +
     S.creators.map(c => nav("c:" + c.id, cav(c), c.name,
-      c.live_job ? `<span class="sb-tag rec" title="Recording now"><i></i>Rec</span>`
-        : liveOn(c).length ? `<span class="sb-tag" title="Live on ${esc(liveOn(c).map(([k]) => PLAT[k].name).join(" and "))}"><i></i>Live</span>` : "")).join("") +
-    `<button class="nav-item" data-act="newcreator" title="New creator">${ic("plusc")}<span class="label">New creator</span></button>` +
-    (S.status.user?.role === "admin" && S.status.accounts !== false ? `<h4><span>Owner</span></h4><a class="nav-item" href="/admin" title="Admin dashboard" style="text-decoration:none">${ic("shield")}<span class="label">Admin dashboard</span></a>` : ""));
+      c.live_job ? `<span class="sb-tag rec" title="Gravando agora"><i></i>Grav</span>`
+        : liveOn(c).length ? `<span class="sb-tag" title="Ao vivo em ${esc(liveOn(c).map(([k]) => PLAT[k].name).join(" e "))}"><i></i>Live</span>` : "")).join("") +
+    `<button class="nav-item" data-act="newcreator" title="Novo criador">${ic("plusc")}<span class="label">Novo criador</span></button>` +
+    (S.status.user?.role === "admin" && S.status.accounts !== false ? `<h4><span>Proprietário</span></h4><a class="nav-item" href="/admin" title="Painel Admin" style="text-decoration:none">${ic("shield")}<span class="label">Painel Admin</span></a>` : ""));
   const st = S.status;
   const k = S.status.ai;
-  put($("#foot"), (k ? `<button class="ai-card ${S.view === "usage" ? "on" : ""}" data-act="go" data-v="usage" title="${k.ready ? `AI: ${esc(k.provider || "ready")}, ${k.today_calls || 0} calls today` : "The AI is not set up"}">
-      <span class="ai-ic">${ic("bolt")}</span><span class="ai-tx"><small>AI</small><b>${k.ready ? esc(k.provider || "Ready") : "Not set up"}</b></span>${k.ready ? `<span class="ai-n">${(k.today_calls || 0).toLocaleString()} today</span>` : ""}</button>` : "") +
+  put($("#foot"), (k ? `<button class="ai-card ${S.view === "usage" ? "on" : ""}" data-act="go" data-v="usage" title="${k.ready ? `IA: ${esc(k.provider || "pronta")}, ${k.today_calls || 0} chamadas hoje` : "A IA não está configurada"}">
+      <span class="ai-ic">${ic("bolt")}</span><span class="ai-tx"><small>IA</small><b>${k.ready ? esc(k.provider || "Pronta") : "Não configurada"}</b></span>${k.ready ? `<span class="ai-n">${(k.today_calls || 0).toLocaleString()} hoje</span>` : ""}</button>` : "") +
     (S.status.user ? `<div class="me"><button class="me-btn" data-act="acctmenu" aria-haspopup="menu" aria-expanded="false">${meAvatar(S.status.user)}
-      <span class="who">${S.status.accounts === false ? `<b>Settings</b><span>AI key, connected apps</span>` : `<b>${esc(S.status.user.name)}</b><span>${esc(S.status.user.email)}</span>`}</span></button>
-      <button class="icon-btn bell" data-act="bell" title="Notifications" aria-label="Notifications${S.status.unread ? `, ${S.status.unread} new` : ""}" aria-haspopup="dialog">${ic("bell")}${S.status.unread ? `<span class="dotn">${S.status.unread > 9 ? "9+" : S.status.unread}</span>` : ""}</button></div>` : ""));
+      <span class="who">${S.status.accounts === false ? `<b>Configurações</b><span>Chave de IA, contas conectadas</span>` : `<b>${esc(S.status.user.name)}</b><span>${esc(S.status.user.email)}</span>`}</span></button>
+      <button class="icon-btn bell" data-act="bell" title="Notificações" aria-label="Notificações${S.status.unread ? `, ${S.status.unread} novas` : ""}" aria-haspopup="dialog">${ic("bell")}${S.status.unread ? `<span class="dotn">${S.status.unread > 9 ? "9+" : S.status.unread}</span>` : ""}</button></div>` : ""));
   const c = creator();
   const recording = S.creators.filter(x => x.live_job).length;
-  let title = {overview:"Home", library:"All videos", settings:"Settings", usage:"AI usage"}[S.view] || "", sub = "", act = "";
-  if (S.view === "usage") sub = "What the AI has been used for.";
-  if (S.view === "overview") sub = `${greeting()}. ${S.creators.length} creator${S.creators.length === 1 ? "" : "s"}${recording ? `, ${recording} recording now` : ""}.`;
-  if (S.view === "library") sub = "Every video and recording, across all creators.";
-  if (S.view === "settings") sub = (S.status.accounts === false ? "Your AI key and connected apps." : "Your profile, security and connected apps.");
+  let title = {overview:"Início", library:"Todos os vídeos", settings:"Configurações", usage:"Uso de IA", tiktok:"TikTok", youtube:"YouTube", instagram:"Instagram"}[S.view] || "", sub = "", act = "";
+  if (S.view === "usage") sub = "Para que a IA foi utilizada.";
+  if (S.view === "overview") sub = `${greeting()}. ${S.creators.length} criador${S.creators.length === 1 ? "" : "es"}${recording ? `, ${recording} gravando agora` : ""}.`;
+  if (S.view === "tiktok") sub = "Central dedicada do TikTok: legendas prontas para copiar do Inbox, ganchos de referência, capas e regras próprias.";
+  if (S.view === "youtube") sub = "Central dedicada do YouTube: Vídeos Longos 16:9 (P1), Shorts, thumbnails em colagem e regras próprias.";
+  if (S.view === "instagram") sub = "Central dedicada do Instagram Reels: fila, capas automáticas, legendas SEO e regras próprias.";
+  if (S.view === "library") sub = "Todos os vídeos e gravações de todos os criadores.";
+  if (S.view === "settings") sub = (S.status.accounts === false ? "Sua chave de IA e aplicativos conectados." : "Seu perfil, segurança e aplicativos conectados.");
   let pic = "", subHtml = null, tabs = "";
+  if (["overview", "tiktok", "youtube", "instagram"].includes(S.view)) {
+    tabs = [["overview", "Visão Geral", "home", 0], ["tiktok", "TikTok", "video", 0], ["youtube", "YouTube", "play", 0], ["instagram", "Instagram", "instagram", 0]].map(([k, l, i]) =>
+      `<button class="tabbtn ${S.view === k ? "on" : ""}" data-act="go" data-v="${k}" role="tab" aria-selected="${S.view === k}">${ic(i)}${l}</button>`).join("");
+  }
   if (c) {
     title = c.name;
     pic = cav(c);
     subHtml = statusBadge(c);
     const nJobs = S.jobs.filter(j => j.creator === c.id).length, nLog = (c.log || []).length;
-    tabs = [["clips", "Clips", "scissors", nJobs], ["setup", "Setup", "cog", 0], ["activity", "Activity", "clock", nLog]].map(([k, l, i, n]) =>
+    tabs = [["clips", "Clipes", "scissors", nJobs], ["setup", "Configurar", "cog", 0], ["activity", "Atividade", "clock", nLog]].map(([k, l, i, n]) =>
       `<button class="tabbtn ${S.ctab === k ? "on" : ""}" data-act="tab" data-t="${k}" role="tab" aria-selected="${S.ctab === k}">${ic(i)}${l}${n ? `<span class="n">${n > 99 ? "99+" : n}</span>` : ""}</button>`).join("");
-    act = c.live_job ? `<button class="btn danger" data-act="stoplive" data-j="${esc(c.live_job)}">${ic("stop")}Stop recording</button>`
-                     : `<button class="btn primary" data-act="golive"><span class="rdot"></span>${liveOn(c).length ? "Record live stream" : "Start recording"}</button>`;
+    act = c.live_job ? `<button class="btn danger" data-act="stoplive" data-j="${esc(c.live_job)}">${ic("stop")}Parar gravação</button>`
+                     : `<button class="btn primary" data-act="golive"><span class="rdot"></span>${liveOn(c).length ? "Gravar live" : "Iniciar gravação"}</button>`;
   }
   if (S.view === "overview" || S.view === "library") {
     const L = S.status.links || {};
-    act = (L.repo ? `<a class="btn" href="${esc(L.repo)}" target="_blank" rel="noopener" title="Star PeakCut on GitHub">${ic("github")}<span>Star<span class="long"> on GitHub</span></span></a>` : "")
-        + (L.follow ? `<a class="btn primary" href="${esc(L.follow)}" target="_blank" rel="noopener" title="Follow the maker of PeakCut on Instagram">${ic("instagram")}Follow me</a>` : "");
+    act = (L.repo ? `<a class="btn" href="${esc(L.repo)}" target="_blank" rel="noopener" title="Favoritar PeakCut no GitHub">${ic("github")}<span>Favoritar<span class="long"> no GitHub</span></span></a>` : "")
+        + (L.follow ? `<a class="btn primary" href="${esc(L.follow)}" target="_blank" rel="noopener" title="Seguir o criador no Instagram">${ic("instagram")}Seguir</a>` : "");
   }
   const me = S.status.user;
   const kk = S.status.ai;
   const up = S.status.update;
   let upSeen = "";
   try { upSeen = localStorage.getItem("peakcut_update_seen") || ""; } catch {}
-  const upBar = up && up.latest !== upSeen ? `<div class="vb" role="status">${ic("up")}<span>${up.restart ? "<b>The new version is downloaded.</b> Close PeakCut and start it again to use it." : `A new version of PeakCut is out${up.behind ? `: <b>${up.behind} update${up.behind === 1 ? "" : "s"}</b> since yours` : ""}.`}</span>
-    <button class="btn sm primary" data-act="updhow">${up.restart ? "What's new" : "How to update"}</button><button class="btn sm ghost" data-act="updlater" aria-label="Hide until the next version">Later</button></div>` : "";
-  const toolBar = S.status.no_ffmpeg ? `<div class="vb" role="alert">${ic("warn")}<span><b>PeakCut can't make clips yet: ffmpeg isn't installed on this computer.</b> Open a terminal, run <code>winget install Gyan.FFmpeg</code> (Mac: <code>brew install ffmpeg</code>, Linux: <code>sudo apt install ffmpeg</code>), then close PeakCut and start it again.</span></div>` : "";
-  const aiBar = !toolBar && S.status.ai?.problem && me?.is_admin && S.view !== "settings" ? `<div class="vb" role="status">${ic("warn")}<span><b>The AI isn't answering.</b> ${esc(S.status.ai.problem)} Until then, clips are picked by loudness.</span><button class="btn sm primary" data-act="go" data-v="settings" data-tab="ai">Open AI settings</button></div>` : "";
-  const diskBar = !toolBar && S.status.disk_full && S.view !== "settings" ? `<div class="vb" role="alert">${ic("warn")}<span><b>The drive PeakCut saves to is almost full, so it can't take new videos.</b> Free up space on it, or move PeakCut's folder to a bigger drive.</span>${me?.is_admin ? `<button class="btn sm primary" data-act="go" data-v="settings" data-tab="storage">Open Storage</button>` : ""}</div>` : "";
-  put($("#vbanner"), toolBar ? toolBar : diskBar ? diskBar : aiBar ? aiBar : upBar ? upBar : me && me.verified === false ? `<div class="vb" role="status">${ic("warn")}<span>Confirm your email to start clipping. We sent a link to <b>${esc(me.email)}</b>.</span><button class="btn sm" data-act="resendverify">Send a new link</button></div>`
-    : kk && kk.ready === false && S.view !== "usage" ? `<div class="vb" role="status">${ic("bolt")}<span>${me?.is_admin ? "Add your AI key to let the AI pick clips and write titles. Until then, clips are picked by loudness." : "The AI isn't set up on this server yet, so clips are picked by loudness."}</span>${me?.is_admin && S.view !== "settings" ? `<button class="btn sm primary" data-act="go" data-v="settings" data-tab="ai">${ic("plus")}Add AI key</button>` : ""}</div>` : "");
+  const upBar = up && up.latest !== upSeen ? `<div class="vb" role="status">${ic("up")}<span>${up.restart ? "<b>A nova versão foi baixada.</b> Reinicie o aplicativo para usar." : `Nova versão disponível${up.behind ? `: <b>${up.behind} atualização${up.behind === 1 ? "" : "ões"}</b> à frente` : ""}.`}</span>
+    <button class="btn sm primary" data-act="updhow">${up.restart ? "Novidades" : "Como atualizar"}</button><button class="btn sm ghost" data-act="updlater" aria-label="Ocultar até a próxima versão">Depois</button></div>` : "";
+  const toolBar = S.status.no_ffmpeg ? `<div class="vb" role="alert">${ic("warn")}<span><b>O ffmpeg não está instalado neste computador.</b> Instale com <code>winget install Gyan.FFmpeg</code> e reinicie.</span></div>` : "";
+  const aiBar = !toolBar && S.status.ai?.problem && me?.is_admin && S.view !== "settings" ? `<div class="vb" role="status">${ic("warn")}<span><b>A IA não está respondendo.</b> ${esc(S.status.ai.problem)} Enquanto isso, os clipes são escolhidos por volume.</span><button class="btn sm primary" data-act="go" data-v="settings" data-tab="ai">Configurar IA</button></div>` : "";
+  const diskBar = !toolBar && S.status.disk_full && S.view !== "settings" ? `<div class="vb" role="alert">${ic("warn")}<span><b>O disco está quase cheio e não aceita novos vídeos.</b> Libere espaço ou mova a pasta de dados.</span>${me?.is_admin ? `<button class="btn sm primary" data-act="go" data-v="settings" data-tab="storage">Abrir Armazenamento</button>` : ""}</div>` : "";
+  put($("#vbanner"), toolBar ? toolBar : diskBar ? diskBar : aiBar ? aiBar : upBar ? upBar : me && me.verified === false ? `<div class="vb" role="status">${ic("warn")}<span>Confirme seu e-mail para começar. Link enviado para <b>${esc(me.email)}</b>.</span><button class="btn sm" data-act="resendverify">Reenviar link</button></div>`
+    : kk && kk.ready === false && S.view !== "usage" ? `<div class="vb" role="status">${ic("bolt")}<span>${me?.is_admin ? "Adicione sua chave de IA para escolher melhores clipes e títulos." : "A IA ainda não está configurada neste servidor."}</span>${me?.is_admin && S.view !== "settings" ? `<button class="btn sm primary" data-act="go" data-v="settings" data-tab="ai">${ic("plus")}Adicionar chave</button>` : ""}</div>` : "");
   put($("#tpic"), pic); $("#tpic").classList.toggle("live", !!(c && (c.live_job || liveOn(c).length)));
   put($("#utabs"), tabs); moveInd(); $(".topbar").classList.toggle("tabbed", !!tabs);
   put($("#title"), `<span>${esc(title)}</span>`); put($("#subtitle"), subHtml ?? esc(sub)); put($("#actions"), act);
 }
 
-const ROUTES = {overview: "", library: "videos", settings: "settings", usage: "usage"};
+const PLAT_VIEWS = ["tiktok", "youtube", "instagram"];
+const ROUTES = {overview: "", library: "videos", settings: "settings", usage: "usage", tiktok: "tiktok", youtube: "youtube", instagram: "instagram"};
 function pathFor(v, tab) {
   if (v.startsWith("c:")) return `/app/creators/${encodeURIComponent(v.slice(2))}${tab && tab !== "clips" ? "/" + tab : ""}`;
   if (v === "settings") return "/app/settings" + (tab ? "/" + tab : "");
@@ -1378,9 +1416,10 @@ function go(v, tab, fromHistory) {
   $("#app").classList.remove("open");
   const view = $("#view");
   if (window._gaStop) { window._gaStop(); window._gaStop = null; }
-  $("#heroSlot").innerHTML = v === "overview" ? `<section class="hero"><div class="ga-bg" id="appAscii" aria-hidden="true"></div><h2>What do you want to clip today?</h2>
-      <p>Paste a link or drop in videos. You get captioned shorts back.</p><div id="add"></div></section>` : "";
+  $("#heroSlot").innerHTML = v === "overview" ? `<section class="hero"><div class="ga-bg" id="appAscii" aria-hidden="true"></div><h2>O que você quer clipar hoje?</h2>
+      <p>Cole um link ou solte vídeos aqui. Você recebe Shorts, Reels e cortes legendados prontos.</p><div id="add"></div></section>` : "";
   if (v === "overview") view.innerHTML = `<div id="ov"></div>`;
+  else if (PLAT_VIEWS.includes(v)) view.innerHTML = `<div id="platview"></div>`;
   else if (v === "library") view.innerHTML = `<div id="add"></div><div id="jobs"></div>`;
   else if (v === "settings") view.innerHTML = `<div id="sform"></div>`;
   else if (v === "usage") { view.innerHTML = `<div id="usage"></div>`; loadUsage(); }
@@ -1390,7 +1429,7 @@ function go(v, tab, fromHistory) {
   if (v === "settings") drawSettings();
   if (v.startsWith("c:")) setTab(S.ctab);
   $("#main").scrollTo(0, 0); render();
-  if (v === "overview") loadOverview();
+  if (v === "overview" || PLAT_VIEWS.includes(v)) loadOverview();
 }
 function setTab(t) {
   S.ctab = t;
@@ -1404,45 +1443,45 @@ function setTab(t) {
 }
 
 /* ============================================================ add bar */
-const LANG_DEFAULT = {pt: "Português (BR)", source: "Same as spoken", en: "English"};
-const LANG_HINTS = {pt: "PT-BR captions & titles", source: "Keep original audio", en: "Translate to English"};
+const LANG_DEFAULT = {pt: "Português (BR)", source: "Mesmo idioma", en: "Inglês"};
+const LANG_HINTS = {pt: "Legendas e títulos em PT-BR", source: "Manter áudio original", en: "Traduzir para inglês"};
 const langMap = () => S.status?.languages || LANG_DEFAULT;
 const defLang = () => S.status?.default_lang || "pt";
 function drawAdd(variant) {
   const c = creator(), langs = langMap(), curLang = c?.output_lang || defLang();
   $("#add").innerHTML = `<form class="composer ${variant === "hero" ? "big" : "compact"}" id="addform">
-    <div class="composer-input">${ic("link")}<input id="url" placeholder="Paste a YouTube, Twitch or Kick video link" autocomplete="off" aria-label="Video link"></div>
+    <div class="composer-input">${ic("link")}<input id="url" placeholder="Cole um link de vídeo do YouTube, Twitch ou Kick" autocomplete="off" aria-label="Link do vídeo"></div>
     <div class="att" id="att"><div><div class="att-in" id="attIn"></div></div></div>
     <div class="composer-bar">
-      <button type="button" class="chip" data-act="pickfile">${ic("up")}Upload video</button>
-      ${c ? "" : picker("o_creator", "File under creator", [{v:"", label:"No creator", icon:"user"}, ...S.creators.map(x => ({v:x.id, label:x.name, img:x.profile?.pic && x.profile.channel === x.channel ? avatarUrl(x) : ""}))], "")}
-      <button type="button" class="chip" data-act="toggleopts" aria-expanded="false">${ic("sliders")}Options</button>
-      <span class="grow"></span><span class="hint">or drop a video file here</span>
-      <button class="btn primary" id="goBtn">${ic("scissors")}Make clips</button>
+      <button type="button" class="chip" data-act="pickfile">${ic("up")}Enviar vídeo</button>
+      ${c ? "" : picker("o_creator", "Salvar no criador", [{v:"", label:"Sem criador", icon:"user"}, ...S.creators.map(x => ({v:x.id, label:x.name, img:x.profile?.pic && x.profile.channel === x.channel ? avatarUrl(x) : ""}))], "")}
+      <button type="button" class="chip" data-act="toggleopts" aria-expanded="false">${ic("sliders")}Opções</button>
+      <span class="grow"></span><span class="hint">ou solte um arquivo de vídeo aqui</span>
+      <button class="btn primary" id="goBtn">${ic("scissors")}Criar clipes</button>
     </div>
     <div class="composer-opts" inert><div class="og">
-      <div class="ob wide"><div class="ot">Output language (captions, hooks &amp; titles)</div><input type="hidden" id="o_lang" value="${esc(curLang)}"><div class="seg" role="group" aria-label="Output language">
+      <div class="ob wide"><div class="ot">Idioma de saída (legendas, ganchos e títulos)</div><input type="hidden" id="o_lang" value="${esc(curLang)}"><div class="seg" role="group" aria-label="Idioma de saída">
         ${Object.entries(langs).map(([k, v]) => `<button type="button" data-seg="o_lang" data-v="${esc(k)}" aria-pressed="${k === curLang}">${esc(v)}<small>${esc(LANG_HINTS[k] || "")}</small></button>`).join("")}
       </div></div>
-      <div class="ob wide"><div class="ot">Clips</div><div class="nsteps">
-        ${stepper("o_max", "How many", c?.max_clips ?? 6, 1, 20, 1, "")}
-        ${stepper("o_min", "Shortest", c?.min_len ?? 15, 5, 120, 5, "s")}
-        ${stepper("o_maxlen", "Longest", c?.max_len ?? 60, 10, 180, 5, "s")}
+      <div class="ob wide"><div class="ot">Clipes</div><div class="nsteps">
+        ${stepper("o_max", "Quantidade", c?.max_clips ?? 6, 1, 20, 1, "")}
+        ${stepper("o_min", "Mais curto", c?.min_len ?? 15, 5, 120, 5, "s")}
+        ${stepper("o_maxlen", "Mais longo", c?.max_len ?? 60, 10, 180, 5, "s")}
       </div></div>
-      <div class="ob"><div class="ot cap-head"><span id="o_style_label">Caption style</span>
-        <label><input type="checkbox" id="o_captions" data-caption-toggle ${c?.captions === false ? "" : "checked"}>Generate captions</label></div>
+      <div class="ob"><div class="ot cap-head"><span id="o_style_label">Estilo de legenda</span>
+        <label><input type="checkbox" id="o_captions" data-caption-toggle ${c?.captions === false ? "" : "checked"}>Gerar legendas</label></div>
         ${choice("o_style", Object.entries(S.status.styles).map(([k, v]) => ({v:k, label:v, prev:capPrev(k)})), c?.style ?? "bounce", c?.captions === false)}</div>
       <div class="ob"><div class="ot">Layout</div>${choice("o_layout", Object.entries(S.status.layouts).map(([k, v]) => ({v:k, label:LAYOUT_SHORT[k] || v, title:v, prev:`<span class="lay-prev ${esc(k)}"><span class="ph"><i></i></span></span>`})), c?.layout ?? "blur")}</div>
-      <div class="ob"><div class="ot">Video quality</div><input type="hidden" id="o_quality" value="720"><div class="seg" role="group" aria-label="Video quality">
-        <button type="button" data-seg="o_quality" data-v="720" aria-pressed="true">720p<small>Fast</small></button>
-        <button type="button" data-seg="o_quality" data-v="1080" aria-pressed="false">1080p<small>Sharper, about 2x slower</small></button></div></div>
-      <div class="ob"><div class="ot">Part of the video</div><div class="range">
-        <label>From<input id="o_from" type="number" min="0" placeholder="start" aria-label="From minute">min</label>${ic("arrowr")}
-        <label>To<input id="o_to" type="number" min="0" placeholder="end" aria-label="Up to minute">min</label></div></div>
+      <div class="ob"><div class="ot">Qualidade do vídeo</div><input type="hidden" id="o_quality" value="720"><div class="seg" role="group" aria-label="Qualidade do vídeo">
+        <button type="button" data-seg="o_quality" data-v="720" aria-pressed="true">720p<small>Rápido</small></button>
+        <button type="button" data-seg="o_quality" data-v="1080" aria-pressed="false">1080p<small>Mais nítido, ~2x mais lento</small></button></div></div>
+      <div class="ob"><div class="ot">Trecho do vídeo</div><div class="range">
+        <label>De<input id="o_from" type="number" min="0" placeholder="início" aria-label="Do minuto">min</label>${ic("arrowr")}
+        <label>Até<input id="o_to" type="number" min="0" placeholder="fim" aria-label="Até o minuto">min</label></div></div>
     </div></div></form>`;
   drawAtt();
 }
-const LAYOUT_SHORT = {blur:"Blurred fill", zoom:"Zoomed in", crop:"Fill screen", gameplay:"Gameplay + facecam"};
+const LAYOUT_SHORT = {blur:"Fundo desfocado", zoom:"Com zoom", crop:"Tela cheia", gameplay:"Gameplay + webcam"};
 const CAP_LOOK = {bounce:{font:"'Archivo Black'", hl:"#FFFF00", up:true}, hype:{font:"Anton", hl:"#FF3C3C", up:true}, clean:{font:"Poppins", hl:"#6BD7FF", up:false, w:800}};
 function capPrev(k) {
   const s = CAP_LOOK[k] || {font:"inherit", hl:"#FF8B33", up:true};
@@ -1569,11 +1608,11 @@ function drawAtt() {
     if (f && !f.dur) { f.dur = v.duration; const th = v.parentElement; if (!th.querySelector(".du")) th.insertAdjacentHTML("beforeend", `<span class="du">${fmtLen(f.dur)}</span>`); }
   }, {once: true}));
   $("#att")?.classList.toggle("has", !!h);
-  const u = $("#url"); if (u) u.placeholder = A.links.length || A.files.length ? "Paste another link" : "Paste a YouTube, Twitch or Kick video link";
+  const u = $("#url"); if (u) u.placeholder = A.links.length || A.files.length ? "Cole outro link" : "Cole um link de vídeo do YouTube, Twitch ou Kick";
   const b = $("#goBtn");
   if (b) { b.disabled = A.busy;
     const k = A.files.length + A.links.filter(l => l.state === "ok").length;
-    b.innerHTML = A.busy ? `${ic("up")}Sending…` : A.queued ? `${ic("clock")}Finding video…` : `${ic("scissors")}Make clips${k > 1 ? ` (${k})` : ""}`; }
+    b.innerHTML = A.busy ? `${ic("up")}Enviando…` : A.queued ? `${ic("clock")}Buscando vídeo…` : `${ic("scissors")}Criar clipes${k > 1 ? ` (${k})` : ""}`; }
 }
 
 async function lookUp(u) {
@@ -1748,6 +1787,7 @@ function clipHtml(j, c) {
     <div class="clip-body">
       <div class="hook">${esc(c.hook || "Untitled clip")}</div>
       <div class="ttl">${esc(c.title)}</div>
+      ${(c.rendered_at || c.made_at) ? `<div class="sub" style="font-size:11px;margin-top:2px">Cortado e legendado: ${when(c.rendered_at || c.made_at)}</div>` : ""}
       ${pills ? `<div class="row" style="gap:4px">${pills}</div>` : ""}
       <div class="clip-foot">
         ${busyClip ? "" : `<label class="selck" title="Select this clip"><input type="checkbox" data-sel="${esc(key)}" ${sel().has(key) ? "checked" : ""} aria-label="Select this clip"></label>`}
@@ -1965,8 +2005,119 @@ function drawLog() {
     : `<div class="empty"><img src="/brand/favicon.svg" alt=""><b>Nothing has happened yet</b>Recordings, clips and posts for this creator will be listed here.</div>`);
 }
 
-/* ============================================================ overview */
-async function loadOverview() { try { S.overview = await api("/api/overview"); } catch { return; } drawOverview(); }
+/* ============================================================ overview & platform hubs */
+async function loadOverview() {
+  try { S.overview = await api("/api/overview"); } catch { return; }
+  drawShell();
+  if (S.view === "overview") drawOverview();
+  if (PLAT_VIEWS.includes(S.view)) drawPlatformView(S.view);
+}
+function platPostCard(p, plat) {
+  const wide = (p.format || "9:16") === "16:9";
+  const stPill = p.status === "posted"
+    ? (p.inbox_mode ? `<span class="pill warn">No Inbox do celular</span>` : `<span class="pill ok">Postado</span>`)
+    : p.status === "failed" ? `<span class="pill bad">Falhou</span>`
+    : p.status === "posting" ? `<span class="pill warn">Postando agora</span>`
+    : `<span class="pill">${clock(p.due_at)}</span>`;
+  const prio = p.priority === 1 ? `<span class="pill">P1 · 16:9</span>` : p.priority === 2 ? `<span class="pill">P2 · Derivado</span>` : "";
+  const thumbHtml = p.cover_url
+    ? `<img src="${esc(p.cover_url)}" alt="" loading="lazy">`
+    : `<span style="display:grid;place-items:center;height:100%;color:var(--faint)">${ic("film")}</span>`;
+  const capId = esc(p.id);
+  return `<div class="plat-row ${wide ? "wide-thumb" : ""}" data-post="${capId}">
+    <div class="plat-thumb">${thumbHtml}${p.duration ? `<span class="du">${fmt(p.duration)}</span>` : ""}</div>
+    <div style="min-width:0">
+      <div class="plat-ref">
+        ${stPill}
+        <span class="pill">${esc(p.format || "9:16")}</span>
+        ${prio}
+        ${p.creator_name ? `<span class="pill">${esc(p.creator_name)}</span>` : ""}
+        ${p.hook ? `<span class="plat-hook" title="Texto queimado no topo do vídeo para identificar rápido no celular">Gancho: ${esc(p.hook)}</span>` : ""}
+        ${p.thumb_text ? `<span class="pill brand">Capa: ${esc(p.thumb_text)}</span>` : ""}
+      </div>
+      <div style="font-weight:600;color:var(--brand-ink);margin-bottom:8px">${p.url ? `<a class="lnk" href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.title)}</a>` : esc(p.title)}</div>
+      ${p.error ? `<div class="err" style="margin-bottom:8px">${esc(p.error)}</div>` : ""}
+      <textarea class="plat-capbox" readonly rows="4" data-captext="${capId}">${esc(p.caption_ready || p.title || "")}</textarea>
+      <div class="plat-acts">
+        <button class="btn sm primary" type="button" data-act="copycap" data-id="${capId}">${ic("copy")}Copiar legenda pronta</button>
+        ${p.hashtags_ready ? `<button class="btn sm" type="button" data-act="copytags" data-id="${capId}" data-t="${esc(p.hashtags_ready)}">Copiar #hashtags</button>` : ""}
+        ${p.cover_dl ? `<a class="btn sm" href="${esc(p.cover_dl)}" download>${ic("down")}Baixar capa</a>` : ""}
+        ${p.status === "scheduled" ? `<button class="btn sm" type="button" data-act="ppostnow" data-id="${capId}" data-j="${esc(p.job)}" data-c="${esc(p.clip)}" data-acc="${esc(p.account)}">${ic("send")}Enviar agora</button>` : ""}
+        ${p.status === "scheduled" ? `<button class="btn sm" type="button" data-act="pcancel" data-id="${capId}">Cancelar</button>` : ""}
+        ${p.status === "failed" ? `<button class="btn sm" type="button" data-act="pretry" data-id="${capId}">Tentar novamente</button>` : ""}
+      </div>
+    </div>
+  </div>`;
+}
+function drawPlatformView(plat) {
+  const o = S.overview, box = $("#platview");
+  if (!o || !box) return;
+  const label = PLAT_LABEL[plat] || plat;
+  const pausedPlats = Array.isArray(o.paused_platforms) ? o.paused_platforms : [];
+  const isPaused = pausedPlats.includes(plat);
+  const accs = (o.accounts || S.accounts || []).filter(a => a.platform === plat);
+  const pref = (o.platform_prefs || {})[plat] || {};
+  const posts = (o.posts || []).filter(p => p.platform === plat);
+  const sched = posts.filter(p => p.status === "scheduled" || p.status === "posting");
+  const inboxOrDone = posts.filter(p => p.status === "posted");
+  const failed = posts.filter(p => p.status === "failed");
+
+  const metaNote = plat === "tiktok"
+    ? `<div class="note" style="margin-bottom:14px">${ic("warn")}<span><b>Modo Caixa de Entrada (Inbox):</b> enquanto o App do TikTok estiver em análise, os vídeos chegam nas notificações do celular sem legenda/capa. Use o <b>Gancho</b> para localizar o vídeo e clique em <b>Copiar legenda pronta</b> ou <b>Baixar capa</b>.</span></div>`
+    : plat === "youtube"
+      ? `<p class="help" style="margin-bottom:14px"><b>Vídeos Longos 16:9 (10–20 min)</b> entram em <b>Prioridade 1</b> com capa automática em colagem (1280x720). Shorts derivados entram em P2.</p>`
+      : `<p class="help" style="margin-bottom:14px">Reels recebem legenda SEO + hashtags automáticas e enviam a capa em colagem quando o túnel HTTPS está ativo.</p>`;
+
+  const cfgHtml = `<div class="card">
+      <div class="card-head">
+        <div><h2>${esc(label)} · Contas e Status</h2>
+          <p class="sub">${accs.length ? accs.map(a => `${esc(a.name)}${a.detail ? " (" + esc(a.detail) + ")" : ""}`).join(" · ") : `Nenhuma conta ${esc(label)} conectada ainda.`}</p>
+        </div>
+        <div class="row" style="gap:8px;flex-wrap:wrap">
+          <button class="btn sm ${isPaused ? "plat-paused" : ""}" data-act="pauseplat" data-p="${esc(plat)}">${ic(isPaused ? "play" : "pause")}${isPaused ? `Retomar ${esc(label)}` : `Pausar só ${esc(label)}`}</button>
+          <button class="btn sm" data-act="go" data-v="settings" data-tab="apps">${ic("plug")}Contas conectadas</button>
+        </div>
+      </div>
+      ${metaNote}
+      <div class="tiles" style="margin-bottom:0">
+        <div class="tile"><i>${ic("clock")}</i><b>${sched.length}</b><span>Na fila (${esc(label)})</span></div>
+        <div class="tile"><i>${ic("check")}</i><b>${inboxOrDone.length}</b><span>${plat === "tiktok" ? "Enviados / Inbox" : "Postados recentes"}</span></div>
+        <div class="tile"><i>${ic("warn")}</i><b>${failed.length}</b><span>Falharam</span></div>
+        <div class="tile"><i>${ic("sliders")}</i><b>${esc(pref.gap_min ?? (plat === "tiktok" ? 120 : 90))} min</b><span>Intervalo mínimo</span></div>
+      </div>
+    </div>
+    <div class="card" id="platcfg">
+      <div class="card-head"><div><h2>Configurações exclusivas — ${esc(label)}</h2><p class="sub">Intervalo, limites, privacidade, CTA e hashtags aplicados especificamente no ${esc(label)}.</p></div>
+        <button class="btn primary sm" type="button" data-act="platcfgsave" data-p="${esc(plat)}">${ic("check")}Salvar ${esc(label)}</button></div>
+      <div class="fields">
+        <label class="f">Intervalo mínimo entre posts (min)<input type="number" min="5" max="1440" data-pk="gap_min" value="${esc(pref.gap_min ?? (plat === "tiktok" ? 120 : 90))}"></label>
+        <label class="f">Máximo de posts por dia<input type="number" min="0" max="500" data-pk="daily_cap" value="${esc(pref.daily_cap ?? 12)}"></label>
+        <label class="f">Nota mínima para auto-postar (0–100)<input type="number" min="0" max="100" data-pk="min_score" value="${esc(pref.min_score ?? 80)}"></label>
+        <label class="f">Privacidade padrão<select data-pk="privacy">${opts({public:"Público", unlisted:"Não listado", private:"Privado"}, pref.privacy || "public")}</select></label>
+        <label class="f span">Hashtags SEO padrão (${esc(label)}, separadas por vírgula)<input data-pk="hashtags" value="${esc(pref.hashtags || "")}" placeholder="GTA6, GTA6Brasil, ViceCity"></label>
+        <label class="f span">Chamada para ação (CTA) padrão nos comentários<input data-pk="cta" value="${esc(pref.cta || "")}" placeholder="O que você achou dessa cena? Comenta aí!"></label>
+        <label class="f span">Rodapé fixo / Créditos<input data-pk="footer" value="${esc(pref.footer || "")}" placeholder="Cortes de @streamer"></label>
+      </div>
+    </div>`;
+
+  const queueHtml = `<div class="card">
+      <div class="card-head"><div><h2>${plat === "tiktok" ? "Prontos no Inbox / Postados (Copiar Legenda e Capa)" : "Postados recentes — " + esc(label)}</h2>
+        <p class="sub">Clique para copiar a legenda completa com palavras-chave SEO e hashtags, ou baixar a capa.</p></div></div>
+      ${inboxOrDone.length ? `<div class="plat-list">${inboxOrDone.slice(0, 15).map(p => platPostCard(p, plat)).join("")}</div>` : `<p class="help">Nenhum item enviado ainda nesta plataforma.</p>`}
+    </div>
+    <div class="card">
+      <div class="card-head"><div><h2>Fila agendada e falhas — ${esc(label)}</h2>
+        <p class="sub">${sched.length} agendado(s)${failed.length ? ` · ${failed.length} falha(s)` : ""}.</p></div></div>
+      ${(sched.length || failed.length) ? `<div class="plat-list">${[...sched, ...failed].slice(0, 40).map(p => platPostCard(p, plat)).join("")}</div>` : `<p class="help">Nada aguardando na fila do ${esc(label)}.</p>`}
+    </div>`;
+
+  if (!$("#platcfg") || !$("#platcfg").contains(document.activeElement) || box.dataset.plat !== plat) {
+    box.dataset.plat = plat;
+    put(box, cfgHtml + `<div id="platqueue">${queueHtml}</div>`);
+  } else {
+    put($("#platqueue"), queueHtml);
+  }
+}
 function barChart(daily) {
   const W = 720, H = 230, pl = 30, pb = 28, pt = 12, n = daily.length, ch = H - pt - pb;
   const peak = Math.max(1, ...daily.map(d => Math.max(d.clips, d.posted)));
@@ -1975,59 +2126,164 @@ function barChart(daily) {
   let g = "";
   for (let i = 0; i <= 4; i++) g += `<line class="gl" x1="${pl}" x2="${W}" y1="${y(i * step)}" y2="${y(i * step)}"/><text x="${pl - 8}" y="${y(i * step) + 4}" text-anchor="end">${i * step}</text>`;
   daily.forEach((d, i) => {
-    const cx = pl + i * cw + cw / 2, lab = new Date(d.day + "T12:00").toLocaleDateString([], {day:"numeric", month:"short"});
-    g += `<g><title>${lab}: ${d.clips} clips made, ${d.posted} posted${d.views ? ", " + d.views.toLocaleString() + " views" : ""}</title>
+    const cx = pl + i * cw + cw / 2, lab = new Date(d.day + "T12:00").toLocaleDateString("pt-BR", {day:"numeric", month:"short"});
+    g += `<g><title>${lab}: ${d.clips} clipes feitos, ${d.posted} postados${d.views ? ", " + d.views.toLocaleString() + " visualizações" : ""}</title>
       <rect class="b1" x="${cx - bw - 1}" y="${y(d.clips)}" width="${bw}" height="${Math.max(0, ch * d.clips / top)}" rx="3"/>
       <rect class="b2" x="${cx + 1}" y="${y(d.posted)}" width="${bw}" height="${Math.max(0, ch * d.posted / top)}" rx="3"/>
       <rect x="${pl + i * cw}" y="${pt}" width="${cw}" height="${ch}" fill="transparent"/></g>`;
-    if (i % 2 === (n - 1) % 2) g += `<text x="${cx}" y="${H - 8}" text-anchor="middle">${i === n - 1 ? "Today" : lab}</text>`;
+    if (i % 2 === (n - 1) % 2) g += `<text x="${cx}" y="${H - 8}" text-anchor="middle">${i === n - 1 ? "Hoje" : lab}</text>`;
   });
-  const none = daily.every(d => !d.clips && !d.posted) ? `<text class="none" x="${(W + pl) / 2}" y="${pt + ch / 2}" text-anchor="middle">No clips in the last 14 days yet</text>` : "";
-  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Clips made and posted per day, last 14 days">${g}${none}</svg>`;
+  const none = daily.every(d => !d.clips && !d.posted) ? `<text class="none" x="${(W + pl) / 2}" y="${pt + ch / 2}" text-anchor="middle">Nenhum clipe nos últimos 14 dias ainda</text>` : "";
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Clipes feitos e postados por dia nos últimos 14 dias">${g}${none}</svg>`;
 }
 function nextSteps(o) {
   const st = [];
-  if (!S.creators.length) st.push(["Add your first creator", "Give each streamer their own workspace, settings and folder.", "newcreator"]);
-  if (!S.jobs.length) st.push(["Make your first clips", "Paste a video link in the box above.", "focusurl"]);
-  if (!S.accounts.length) st.push(["Connect a posting account", "YouTube, Instagram or TikTok, in one click.", "go:settings"]);
-  if (S.creators.length && !S.creators.some(c => c.auto_watch)) st.push(["Turn on auto-record", "Record by itself whenever a creator goes live.", "go:c:" + S.creators[0].id + ":setup"]);
+  if (!S.creators.length) st.push(["Adicione seu primeiro criador", "Crie um espaço próprio com configurações e pasta para cada streamer.", "newcreator"]);
+  if (!S.jobs.length) st.push(["Faça seus primeiros clipes", "Cole um link de vídeo na caixa acima.", "focusurl"]);
+  if (!S.accounts.length) st.push(["Conecte uma conta para postar", "YouTube, Instagram ou TikTok em um clique.", "go:settings"]);
+  if (S.creators.length && !S.creators.some(c => c.auto_watch)) st.push(["Ative a gravação automática", "Grava sozinho sempre que o criador entrar ao vivo.", "go:c:" + S.creators[0].id + ":setup"]);
   return st;
 }
+const PLAT_LABEL = {youtube: "YouTube", instagram: "Instagram", tiktok: "TikTok"};
+const PLAT_SHORT = {youtube: "YT", instagram: "IG", tiktok: "TT"};
 function drawOverview() {
   const o = S.overview, box = $("#ov"); if (!o || !box) return;
+  const f = S.ov || (S.ov = {creator:"", platform:"", status:"", format:"", group:false, limit:60});
   const sum = k => o.creators.reduce((a, r) => a + r[k], 0);
   const d14 = k => (o.daily || []).reduce((a, d) => a + d[k], 0);
-  const state = r => r.state === "recording" ? `<span class="pill live"><span class="dot"></span>Recording</span>` : r.state === "waiting" ? `<span class="pill warn">Waiting for live</span>` : `<span class="pill">Idle</span>`;
-  const pst = p => p.status === "posted" ? `<span class="pill ok">Posted</span>` : p.status === "failed" ? `<span class="pill bad">Failed</span>` : p.status === "posting" ? `<span class="pill warn">Posting now</span>` : `<span class="pill warn">${clock(p.due_at)}</span>`;
+  const state = r => r.state === "recording" ? `<span class="pill live"><span class="dot"></span>Gravando</span>` : r.state === "waiting" ? `<span class="pill warn">Aguardando live</span>` : `<span class="pill">Inativo</span>`;
+  const pst = p => p.status === "posted" ? `<span class="pill ok">Postado</span>` : p.status === "failed" ? `<span class="pill bad">Falhou</span>` : p.status === "posting" ? `<span class="pill warn">Postando agora</span>` : `<span class="pill warn">${clock(p.due_at)}</span>`;
   const steps = nextSteps(o);
+  const pausedPlats = Array.isArray(o.paused_platforms) ? o.paused_platforms : [];
+  const allPosts = o.posts || [];
+  const creatorOpts = [...new Map(allPosts.map(p => [p.creator || "", p.creator_name || "Sem criador"])).entries()]
+    .sort((a, b) => a[1].localeCompare(b[1], "pt-BR"));
+  const filtered = allPosts.filter(p => {
+    if (f.creator && (p.creator || "") !== f.creator) return false;
+    if (f.platform && p.platform !== f.platform) return false;
+    if (f.status && p.status !== f.status) return false;
+    if (f.format && (p.format || "9:16") !== f.format) return false;
+    return true;
+  });
+  const prioTag = p => (p.priority === 1 ? `<span class="pill">P1 · 16:9</span> ` : p.priority === 2 ? `<span class="pill">P2 · Derivado</span> ` : "")
+    + (p.duration ? `<span class="pill">${fmt(p.duration)}</span> ` : "")
+    + (p.optimized ? `<span class="pill ok" title="Inclui CTA de comentário, hashtags PT-BR (#GTA6Brasil), curadoria score 85+ e capa de alto contraste">Otimizado</span> ` : "");
+  const stampPt = ts => ts ? new Date(ts * 1000).toLocaleString("pt-BR", {day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit"}) : "–";
+  const prepHtml = p => {
+    const mTxt = stampPt(p.made_at);
+    const qTxt = stampPt(p.queued_at || p.created);
+    return `<div style="line-height:1.35;font-size:12px"><div><span class="sub">Cortado:</span> <b>${mTxt}</b></div><div><span class="sub">Na fila:</span> ${qTxt}</div></div>`;
+  };
+  const hasFilter = !!(f.creator || f.platform || f.status || f.format);
+
+  let rowsHtml = "";
+  let totalShownUnits = 0;
+  let totalUnits = 0;
+  if (f.group) {
+    const groupsMap = new Map();
+    for (const p of filtered) {
+      const gk = `${p.job}:${p.clip}`;
+      let g = groupsMap.get(gk);
+      if (!g) {
+        g = {key: gk, title: p.title, creator_name: p.creator_name || "Sem criador", priority: p.priority, format: p.format || "9:16", items: []};
+        groupsMap.set(gk, g);
+      }
+      g.items.push(p);
+    }
+    const groups = [...groupsMap.values()].map(g => {
+      const opens = g.items.filter(x => x.status === "scheduled" || x.status === "posting");
+      const sortAt = opens.length ? Math.min(...opens.map(x => x.due_at || 0)) : Math.max(...g.items.map(x => x.posted_at || x.due_at || 0));
+      return {...g, sortAt, hasOpen: opens.length > 0};
+    }).sort((a, b) => a.hasOpen !== b.hasOpen ? (a.hasOpen ? -1 : 1) : a.hasOpen ? (a.sortAt - b.sortAt) : (b.sortAt - a.sortAt));
+    totalUnits = groups.length;
+    const vis = groups.slice(0, f.limit || 60);
+    totalShownUnits = vis.length;
+    rowsHtml = `<div class="scroll"><table class="stack"><tr><th>Clipe</th><th>Preparado / Na fila</th><th>Criador</th><th>Plataformas e horários</th><th class="num">Views</th><th></th></tr>
+      ${vis.map(g => {
+        const ref = g.items[0];
+        const postedUrl = g.items.find(x => x.url)?.url;
+        const viewsSum = g.items.reduce((acc, x) => acc + (x.views || 0), 0);
+        const hasViews = g.items.some(x => x.views != null);
+        const schedIds = g.items.filter(x => x.status === "scheduled").map(x => x.id);
+        const failIds = g.items.filter(x => x.status === "failed").map(x => x.id);
+        const chips = g.items.map(x => {
+          const pl = PLAT_SHORT[x.platform] || esc(x.platform);
+          const stTxt = x.status === "posted" ? (x.url ? `<a class="lnk" href="${esc(x.url)}" target="_blank" rel="noopener">Postado</a>` : `<span style="color:var(--good)">Postado</span>`)
+            : x.status === "failed" ? `<span style="color:var(--bad)" title="${esc(x.error || "")}">Falhou</span>`
+            : x.status === "posting" ? `<span style="color:var(--brand-deep)">Postando</span>`
+            : `<span>${clock(x.due_at)}</span>`;
+          const actBtn = x.status === "scheduled" ? `<button class="btn sm" data-act="pcancel" data-id="${x.id}" title="Cancelar ${esc(PLAT_LABEL[x.platform] || x.platform)}">×</button>`
+            : x.status === "failed" ? `<button class="btn sm" data-act="pretry" data-id="${x.id}" title="Tentar novamente">↻</button>` : "";
+          return `<span class="plat-chip"><b>${pl}</b><span class="sub">${esc(x.account_name)}</span>· ${stTxt}${actBtn}</span>`;
+        }).join("");
+        const bulkAct = schedIds.length > 1 ? `<button class="btn sm" data-act="pcancelbulk" data-ids="${esc(schedIds.join(","))}" title="Cancelar todas agendadas deste clipe">Cancelar (${schedIds.length})</button>`
+          : failIds.length > 1 ? `<button class="btn sm" data-act="pretrybulk" data-ids="${esc(failIds.join(","))}" title="Reenviar falhas deste clipe">Reenviar (${failIds.length})</button>` : "";
+        return `<tr><td data-l="Clipe" class="c-main">${prioTag(ref)}${postedUrl ? `<a class="lnk" href="${esc(postedUrl)}" target="_blank" rel="noopener">${esc(g.title)}</a>` : esc(g.title)}</td>
+          <td data-l="Preparado">${prepHtml(ref)}</td>
+          <td data-l="Criador">${esc(g.creator_name)}</td>
+          <td data-l="Plataformas"><div class="plat-chips">${chips}</div></td>
+          <td data-l="Views" class="num">${hasViews ? viewsSum.toLocaleString() : "–"}</td>
+          <td class="c-act" style="text-align:right">${bulkAct}</td></tr>`;
+      }).join("")}</table></div>`;
+  } else {
+    totalUnits = filtered.length;
+    const vis = filtered.slice(0, f.limit || 60);
+    totalShownUnits = vis.length;
+    rowsHtml = `<div class="scroll"><table class="stack"><tr><th>Agendado</th><th>Preparado / Na fila</th><th>Clipe</th><th>Criador</th><th>Conta</th><th class="num">Views</th><th></th></tr>
+      ${vis.map(p => `<tr><td data-l="Agendado">${pst(p)}</td>
+        <td data-l="Preparado">${prepHtml(p)}</td>
+        <td data-l="Clipe" class="c-main">${prioTag(p)}${p.url ? `<a class="lnk" href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.title)}</a>` : esc(p.title)}${p.error ? `<div class="err" style="margin:2px 0 0">${esc(p.error)}</div>` : ""}</td>
+        <td data-l="Criador">${esc(p.creator_name || "Sem criador")}</td>
+        <td data-l="Conta"><span class="pill">${PLAT_SHORT[p.platform] || esc(p.platform)}</span> ${esc(p.account_name)}</td>
+        <td data-l="Views" class="num">${p.views ?? "–"}</td>
+        <td class="c-act" style="text-align:right">${p.caption_ready ? `<button class="btn sm" data-act="copycap" data-id="${p.id}" title="Copiar legenda pronta">${ic("copy")}</button> ` : ""}${p.status === "scheduled" ? `<button class="btn sm" data-act="pcancel" data-id="${p.id}">Cancelar</button>` : p.status === "failed" ? `<button class="btn sm" data-act="pretry" data-id="${p.id}">Tentar novamente</button>` : ""}</td></tr>`).join("")}</table></div>`;
+  }
+
+  const platBtns = ["youtube", "instagram", "tiktok"].map(pl => {
+    const isP = pausedPlats.includes(pl);
+    return `<button class="btn sm ${isP ? "plat-paused" : ""}" data-act="pauseplat" data-p="${pl}" title="${isP ? `Retomar postagens no ${PLAT_LABEL[pl]}` : `Pausar postagens no ${PLAT_LABEL[pl]}`}">${ic(isP ? "play" : "pause")}${PLAT_LABEL[pl]}${isP ? " (pausado)" : ""}</button>`;
+  }).join("");
+
+  const queueSub = o.paused
+    ? "Pausada no geral. Gravações e clipes continuam; nada será postado."
+    : pausedPlats.length
+      ? `Postagens ativas — pausada em: ${pausedPlats.map(x => PLAT_LABEL[x] || x).join(", ")}.`
+      : "Clipes na fila saem no horário agendado (máx. 3 Shorts/Reels por período).";
+
   put(box, `<div class="tiles">
-      <div class="tile"><i>${ic("radio")}</i><b>${o.recording}</b><span>Recording now</span></div>
-      <div class="tile"><i>${ic("scissors")}</i><b>${sum("clips_today")}</b><span>Clips today</span></div>
-      <div class="tile"><i>${ic("send")}</i><b>${sum("posted_today")}</b><span>Posted today</span></div>
-      <div class="tile"><i>${ic(sum("failed") ? "warn" : "clock")}</i><b>${sum("queued")}</b><span>Waiting to post${sum("failed") ? ` · <span style="color:var(--bad)">${sum("failed")} failed</span>` : ""}</span></div></div>
+      <div class="tile"><i>${ic("radio")}</i><b>${o.recording}</b><span>Gravando agora</span></div>
+      <div class="tile"><i>${ic("scissors")}</i><b>${sum("clips_today")}</b><span>Clipes hoje</span></div>
+      <div class="tile"><i>${ic("send")}</i><b>${sum("posted_today")}</b><span>Postados hoje</span></div>
+      <div class="tile"><i>${ic(sum("failed") ? "warn" : "clock")}</i><b>${sum("queued")}</b><span>Na fila para postar${sum("failed") ? ` · <span style="color:var(--bad)">${sum("failed")} falharam</span>` : ""}</span></div></div>
     <div class="home-grid">
-      <div class="card"><div class="card-head"><div><h2>Activity</h2><p class="sub">Last 14 days</p></div>
-          <div class="kpis"><div class="kpi"><b>${d14("clips")}</b><span>Clips made</span></div><div class="kpi"><b>${d14("posted")}</b><span>Posted</span></div>
-            <div class="kpi"><b>${sum("views").toLocaleString()}</b><span>Views</span></div><div class="kpi"><b>$${sum("earnings").toFixed(2)}</b><span>Est. earnings</span></div></div></div>
-        <div class="legend"><span><i style="background:var(--brand)"></i>Clips made</span><span><i style="background:var(--brand-ink)"></i>Posted</span></div>
+      <div class="card"><div class="card-head"><div><h2>Atividade</h2><p class="sub">Últimos 14 dias</p></div>
+          <div class="kpis"><div class="kpi"><b>${d14("clips")}</b><span>Clipes feitos</span></div><div class="kpi"><b>${d14("posted")}</b><span>Postados</span></div>
+            <div class="kpi"><b>${sum("views").toLocaleString()}</b><span>Visualizações</span></div><div class="kpi"><b>$${sum("earnings").toFixed(2)}</b><span>Ganhos est.</span></div></div></div>
+        <div class="legend"><span><i style="background:var(--brand)"></i>Clipes feitos</span><span><i style="background:var(--brand-ink)"></i>Postados</span></div>
         ${barChart(o.daily || [])}</div>
       ${aiCard()}
     </div>
-    ${steps.length ? `<div class="card"><div class="card-head"><div><h2>Next steps</h2><p class="sub">Finish setting up PeakCut</p></div></div>
+    ${steps.length ? `<div class="card"><div class="card-head"><div><h2>Próximos passos</h2><p class="sub">Termine de configurar sua conta</p></div></div>
       <div class="steps across">${steps.map((x, i) => `<button class="step" data-act="step" data-to="${esc(x[2])}"><span class="n">${i + 1}</span><span><b>${esc(x[0])}</b><span class="d">${esc(x[1])}</span></span>${ic("arrowr")}</button>`).join("")}</div></div>` : ""}
-    <div class="card"><div class="card-head"><div><h2>Creators</h2><p class="sub">Each creator's status and results</p></div></div>
-      ${o.creators.length ? `<div class="scroll"><table><tr><th>Creator</th><th>Status</th><th>Auto-post</th><th class="num">Clips today</th><th class="num">Posted today</th><th class="num">Waiting</th><th class="num">Failed</th><th class="num">Views</th><th class="num">Est. $</th></tr>
-      ${o.creators.map(r => `<tr><td><a class="lnk" href="#" data-act="go" data-v="c:${esc(r.id)}">${esc(r.name)}</a></td><td>${state(r)}</td><td>${r.autopost ? `<span class="pill ok">On</span>` : `<span class="pill">Off</span>`}</td><td class="num">${r.clips_today} <span class="sub">/ ${r.clips_total}</span></td><td class="num">${r.posted_today} <span class="sub">/ ${r.posted_total}</span></td><td class="num">${r.queued}</td><td class="num">${r.failed}</td><td class="num">${r.views.toLocaleString()}</td><td class="num">${r.earnings.toFixed(2)}</td></tr>`).join("")}</table></div>`
-      : `<div class="empty"><img src="/brand/favicon.svg" alt=""><b>No creators yet</b>Add one to give each streamer their own workspace.</div>`}</div>
-    <div class="card"><div class="card-head"><div><h2>Post queue</h2><p class="sub">${o.paused ? "Paused. Recording and clipping carry on; nothing is posted." : "Queued clips go out at their scheduled time."}</p></div>
-        <button class="btn ${o.paused ? "primary" : ""}" data-act="pause">${ic(o.paused ? "play" : "pause")}${o.paused ? "Resume posting" : "Pause all posting"}</button></div>
-      ${o.posts.length ? `<div class="scroll"><table class="stack"><tr><th>When</th><th>Clip</th><th>Creator</th><th>Account</th><th class="num">Views</th><th></th></tr>
-      ${o.posts.map(p => {
-        const prio = p.priority === 1 ? `<span class="pill">P1 · 16:9</span> ` : p.priority === 2 ? `<span class="pill">P2 · Derived</span> ` : "";
-        return `<tr><td data-l="Status">${pst(p)}</td><td data-l="Clip" class="c-main">${prio}${p.url ? `<a class="lnk" href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.title)}</a>` : esc(p.title)}${p.error ? `<div class="err" style="margin:2px 0 0">${esc(p.error)}</div>` : ""}</td><td data-l="Creator">${esc(p.creator_name || "None")}</td><td data-l="Account">${esc(p.account_name)}</td><td data-l="Views" class="num">${p.views ?? "–"}</td>
-        <td class="c-act" style="text-align:right">${p.status === "scheduled" ? `<button class="btn sm" data-act="pcancel" data-id="${p.id}">Cancel</button>` : p.status === "failed" ? `<button class="btn sm" data-act="pretry" data-id="${p.id}">Retry</button>` : ""}</td></tr>`;
-      }).join("")}</table></div>`
-      : `<p class="help">Nothing queued or posted yet.</p>`}</div>`);
+    <div class="card"><div class="card-head"><div><h2>Criadores</h2><p class="sub">Status e resultados de cada criador</p></div></div>
+      ${o.creators.length ? `<div class="scroll"><table><tr><th>Criador</th><th>Status</th><th>Postagem auto.</th><th class="num">Clipes hoje</th><th class="num">Postados hoje</th><th class="num">Na fila</th><th class="num">Falhas</th><th class="num">Views</th><th class="num">Est. $</th></tr>
+      ${o.creators.map(r => `<tr><td><a class="lnk" href="#" data-act="go" data-v="c:${esc(r.id)}">${esc(r.name)}</a></td><td>${state(r)}</td><td>${r.autopost ? `<span class="pill ok">Ligada</span>` : `<span class="pill">Desligada</span>`}</td><td class="num">${r.clips_today} <span class="sub">/ ${r.clips_total}</span></td><td class="num">${r.posted_today} <span class="sub">/ ${r.posted_total}</span></td><td class="num">${r.queued}</td><td class="num">${r.failed}</td><td class="num">${r.views.toLocaleString()}</td><td class="num">${r.earnings.toFixed(2)}</td></tr>`).join("")}</table></div>`
+      : `<div class="empty"><img src="/brand/favicon.svg" alt=""><b>Nenhum criador ainda</b>Adicione um criador para organizar seus canais e clipes.</div>`}</div>
+    <div class="card"><div class="card-head"><div><h2>Fila de postagem</h2><p class="sub">${queueSub}</p></div>
+        <div class="ov-acts">
+          ${platBtns}
+          <button class="btn sm ${f.group ? "primary" : ""}" data-act="ovgroup" title="Alternar entre fila cronológica e agrupada por clipe">${f.group ? "Visão: Por clipe" : "Visão: Cronológica"}</button>
+          <button class="btn ${o.paused ? "primary" : ""}" data-act="pause">${ic(o.paused ? "play" : "pause")}${o.paused ? "Retomar tudo" : "Pausar tudo"}</button>
+        </div></div>
+      ${allPosts.length ? `<div class="ov-filters">
+        <select data-ovf="creator" aria-label="Filtrar por criador"><option value="">Todos criadores</option>${creatorOpts.map(([id, nm]) => `<option value="${esc(id)}"${f.creator === id ? " selected" : ""}>${esc(nm)}</option>`).join("")}</select>
+        <select data-ovf="platform" aria-label="Filtrar por plataforma"><option value="">Todas plataformas</option><option value="youtube"${f.platform === "youtube" ? " selected" : ""}>YouTube</option><option value="instagram"${f.platform === "instagram" ? " selected" : ""}>Instagram</option><option value="tiktok"${f.platform === "tiktok" ? " selected" : ""}>TikTok</option></select>
+        <select data-ovf="status" aria-label="Filtrar por status"><option value="">Todos status</option><option value="scheduled"${f.status === "scheduled" ? " selected" : ""}>Agendado</option><option value="posting"${f.status === "posting" ? " selected" : ""}>Postando agora</option><option value="posted"${f.status === "posted" ? " selected" : ""}>Postado</option><option value="failed"${f.status === "failed" ? " selected" : ""}>Falhou</option></select>
+        <select data-ovf="format" aria-label="Filtrar por formato"><option value="">Todos formatos</option><option value="9:16"${f.format === "9:16" ? " selected" : ""}>9:16 (Curtos)</option><option value="16:9"${f.format === "16:9" ? " selected" : ""}>16:9 (Longos)</option></select>
+        ${hasFilter ? `<button class="btn sm ghost" data-act="ovclear">Limpar filtros</button>` : ""}
+        <span class="ov-cnt">${totalUnits} ${f.group ? "clipe(s)" : "item(ns)"}</span>
+      </div>${totalUnits ? rowsHtml + (totalUnits > totalShownUnits ? `<div class="ov-foot"><span>Mostrando ${totalShownUnits} de ${totalUnits}</span><button class="btn sm" data-act="ovmore">Mostrar mais</button></div>` : "") : `<p class="help">Nenhum item encontrado com os filtros atuais.</p>`}`
+      : `<p class="help">Nada na fila ou postado ainda.</p>`}</div>`);
 }
 
 /* ============================================================ AI usage */
@@ -2992,7 +3248,48 @@ document.addEventListener("click", async e => {
     if (a === "csave") return void await saveCreator();
     if (a === "cdiscard") { drawCreatorForm(); return toast("Changes discarded"); }
     if (a === "pause") { await send("/api/settings", {paused:!S.overview.paused}, "PUT"); return loadOverview(); }
+    if (a === "pauseplat") {
+      const cur = Array.isArray(S.overview?.paused_platforms) ? [...S.overview.paused_platforms] : [];
+      const next = cur.includes(d.p) ? cur.filter(x => x !== d.p) : [...cur, d.p];
+      await send("/api/settings", {paused_platforms: next}, "PUT");
+      return loadOverview();
+    }
+    if (a === "ovgroup") { S.ov.group = !S.ov.group; S.ov.limit = 60; return drawOverview(); }
+    if (a === "ovclear") { S.ov = {...S.ov, creator:"", platform:"", status:"", format:"", limit:60}; return drawOverview(); }
+    if (a === "ovmore") { S.ov.limit = (S.ov.limit || 60) + 60; return drawOverview(); }
     if (a === "pcancel" || a === "pretry") { await api(`/api/posts/${d.id}/${a === "pcancel" ? "cancel" : "retry"}`, {method:"POST"}); return loadOverview(); }
+    if (a === "copycap") {
+      const p = (S.overview?.posts || []).find(x => x.id === d.id);
+      const txt = p?.caption_ready || $(`[data-captext="${d.id}"]`)?.value || "";
+      if (!txt) return toast("Sem legenda disponível ainda.", "bad");
+      await navigator.clipboard.writeText(txt);
+      return toast("Legenda completa e #hashtags copiadas!", "ok");
+    }
+    if (a === "copytags") {
+      await navigator.clipboard.writeText(d.t || "");
+      return toast("Hashtags copiadas!", "ok");
+    }
+    if (a === "platcfgsave") {
+      const plat = d.p, pref = {};
+      $$("#platcfg [data-pk]").forEach(i => {
+        pref[i.dataset.pk] = i.type === "checkbox" ? i.checked : i.type === "number" ? Number(i.value) : i.value;
+      });
+      await send("/api/settings", {platform_prefs: {[plat]: pref}}, "PUT");
+      toast(`Configurações de ${PLAT_LABEL[plat] || plat} salvas!`, "ok");
+      return loadOverview();
+    }
+    if (a === "ppostnow") {
+      if (!await ask("Enviar este clipe agora?", "A postagem será disparada imediatamente para esta plataforma.", "Enviar agora")) return;
+      if (d.id) await api(`/api/posts/${d.id}/cancel`, {method:"POST"});
+      await send("/api/posts", {job: d.j, clip: d.c, accounts: [d.acc], now: true});
+      toast("Envio imediato disparado!", "ok");
+      return loadOverview();
+    }
+    if (a === "pcancelbulk" || a === "pretrybulk") {
+      const act = a === "pcancelbulk" ? "cancel" : "retry";
+      for (const id of String(d.ids || "").split(",").filter(Boolean)) await api(`/api/posts/${id}/${act}`, {method:"POST"});
+      return loadOverview();
+    }
     if (a === "ssave") { await saveSettings(); toast("Saved", "ok"); return drawSettings(); }
     if (a === "plansave") {
       const p = {}; $$("#sform [data-plan]").forEach(i => { (p[i.dataset.plan] ??= {})[i.dataset.f] = Number(i.value); });
@@ -3020,6 +3317,13 @@ document.addEventListener("click", async e => {
 });
 
 $("#collapseBtn").innerHTML = ic("sidebar"); $("#menuBtn").innerHTML = ic("menu");
+document.addEventListener("change", e => {
+  const s = e.target.closest?.("[data-ovf]");
+  if (!s) return;
+  S.ov[s.dataset.ovf] = s.value;
+  S.ov.limit = 60;
+  drawOverview();
+});
 try { if (localStorage.getItem("mini")) $("#app").classList.add("mini"); } catch {}
 $("#main").addEventListener("scroll", () => $(".topbar").classList.toggle("stuck", $("#main").scrollTop > 4), {passive:true});
 (async () => {
@@ -3047,7 +3351,7 @@ $("#main").addEventListener("scroll", () => $(".topbar").classList.toggle("stuck
   loop();
   if (S.status.tour && !$("#formdlg").open) setTimeout(startTour, 500);   // once, the first time someone signs in
   checkNew(true);
-  setInterval(async () => { try { S.status = await api("/api/status"); drawShell(); if (S.view === "overview") drawOverview(); checkNew(); } catch {} }, 15000);
+  setInterval(async () => { try { S.status = await api("/api/status"); drawShell(); if (S.view === "overview") drawOverview(); if (PLAT_VIEWS.includes(S.view)) loadOverview(); checkNew(); } catch {} }, 15000);
 })();
 </script>
 </body>

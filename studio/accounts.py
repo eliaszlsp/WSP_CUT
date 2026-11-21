@@ -23,8 +23,40 @@ _lock = threading.RLock()
 _states: dict = {}   # one-time values for the connect redirects: state -> (user id, when, platform)
 
 SECRET_KEYS = ("discord_webhook", "telegram_token")
+PLATFORM_PREF_DEFAULTS = {
+    "tiktok": {
+        "gap_min": 120,
+        "daily_cap": 12,
+        "min_score": 80,
+        "hashtags": "GTA6Brasil,ViceCity,GameplayBR,FYP",
+        "cta": "Qual parte você achou mais absurda? Comenta aí!",
+        "footer": "",
+        "privacy": "public",
+        "allow_long": False,
+    },
+    "youtube": {
+        "gap_min": 90,
+        "daily_cap": 12,
+        "min_score": 80,
+        "hashtags": "GTA6,GTAVI,GTA6Brasil,ViceCity",
+        "cta": "Qual detalhe mais chamou sua atenção? Deixe nos comentários!",
+        "footer": "",
+        "privacy": "public",
+        "allow_long": True,
+    },
+    "instagram": {
+        "gap_min": 90,
+        "daily_cap": 12,
+        "min_score": 80,
+        "hashtags": "GTA6Brasil,ReelsBrasil,ViceCity,GamingBR",
+        "cta": "Manda pra quem precisa ver isso! Comenta aí!",
+        "footer": "",
+        "privacy": "public",
+        "allow_long": False,
+    },
+}
 SETTING_DEFAULTS = {"discord_webhook": "", "telegram_token": "", "telegram_chat": "", "paused": False,
-                    "paused_platforms": [], "digest_hour": 8, "last_digest": "", "tour_done": False}
+                    "paused_platforms": [], "platform_prefs": {}, "digest_hour": 8, "last_digest": "", "tour_done": False}
 
 YT_SCOPES = "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly"
 IG = "https://graph.instagram.com"
@@ -242,10 +274,11 @@ def _link_key() -> bytes:
 
 
 def clip_link(job_id: str, file_name: str, seconds: int = 3600) -> str:
+    ext = "jpg" if str(file_name).lower().endswith(".jpg") else "mp4"
     body = json.dumps([ctx.uid(), job_id, file_name, int(time.time() + seconds)], separators=(",", ":")).encode()
     b = base64.urlsafe_b64encode(body).decode().rstrip("=")
     sig = base64.urlsafe_b64encode(hmac.new(_link_key(), b.encode(), hashlib.sha256).digest()[:18]).decode().rstrip("=")
-    return f"{config.PUBLIC_URL}/pub/{b}.{sig}.mp4"
+    return f"{config.PUBLIC_URL}/pub/{b}.{sig}.{ext}"
 
 
 def read_clip_link(token: str):
@@ -256,7 +289,7 @@ def read_clip_link(token: str):
         if not hmac.compare_digest(sig, want):
             return None
         uid, job_id, name, until = json.loads(base64.urlsafe_b64decode(b + "=" * (-len(b) % 4)))
-        if time.time() > until or not re.fullmatch(r"[\w\-]+\.mp4", name):
+        if time.time() > until or not re.fullmatch(r"[\w\-]+\.(?:mp4|jpg)", name):
             return None
         return uid, job_id, name
     except (ValueError, TypeError):
@@ -265,6 +298,45 @@ def read_clip_link(token: str):
 
 # ------------------------------------------------------------------ settings
 _settings_mem: dict = {}
+
+
+def platform_prefs(st: dict | None = None) -> dict:
+    """Merged per-platform posting preferences (TikTok, YouTube, Instagram)."""
+    raw = (settings() if st is None else st).get("platform_prefs") or {}
+    out = {}
+    for p, defs in PLATFORM_PREF_DEFAULTS.items():
+        ov = raw.get(p) if isinstance(raw.get(p), dict) else {}
+        out[p] = {**defs, **ov}
+    return out
+
+
+def _clean_platform_prefs(cur: dict, patch: dict) -> dict:
+    out = {p: dict(v) for p, v in (cur or {}).items() if p in PLATFORM_PREF_DEFAULTS and isinstance(v, dict)}
+    if not isinstance(patch, dict):
+        return out
+    for p, raw in patch.items():
+        if p not in PLATFORM_PREF_DEFAULTS or not isinstance(raw, dict):
+            continue
+        row = dict(out.get(p) or {})
+        if "gap_min" in raw and raw["gap_min"] is not None:
+            row["gap_min"] = max(5, min(1440, int(float(raw["gap_min"]))))
+        if "daily_cap" in raw and raw["daily_cap"] is not None:
+            row["daily_cap"] = max(0, min(500, int(float(raw["daily_cap"]))))
+        if "min_score" in raw and raw["min_score"] is not None:
+            row["min_score"] = max(0, min(100, int(float(raw["min_score"]))))
+        if "hashtags" in raw and raw["hashtags"] is not None:
+            tags = [re.sub(r"[^\wÀ-ÿ]", "", t) for t in re.split(r"[\s,#]+", str(raw["hashtags"] or "")) if t.strip()]
+            row["hashtags"] = ",".join(dict.fromkeys(t[:30] for t in tags if t))[:240]
+        if "cta" in raw and raw["cta"] is not None:
+            row["cta"] = str(raw["cta"]).strip()[:240]
+        if "footer" in raw and raw["footer"] is not None:
+            row["footer"] = str(raw["footer"]).strip()[:240]
+        if "privacy" in raw and raw["privacy"] in ("public", "unlisted", "private"):
+            row["privacy"] = raw["privacy"]
+        if "allow_long" in raw:
+            row["allow_long"] = bool(raw["allow_long"])
+        out[p] = row
+    return out
 
 
 def settings() -> dict:
@@ -286,6 +358,8 @@ def save_settings(patch: dict) -> dict:
                 raw = v.split(",") if isinstance(v, str) else (list(v) if isinstance(v, (list, tuple, set)) else [])
                 chosen = {str(x).strip().lower() for x in raw}
                 v = [p for p in PLATFORM_NAMES if p in chosen]
+            elif k == "platform_prefs":
+                v = _clean_platform_prefs(s.get("platform_prefs") or {}, v)
             elif k == "digest_hour":
                 v = max(0, min(23, int(v)))
             else:
@@ -506,7 +580,7 @@ def _ig_token(acc) -> str:
     return acc["token"]
 
 
-def instagram_upload(acc, path: Path, caption: str, job_id: str = "", clip_name: str = ""):
+def instagram_upload(acc, path: Path, caption: str, job_id: str = "", clip_name: str = "", cover_name: str = ""):
     """A Reel. On a public site Instagram fetches the clip from a one-hour signed link; on a computer it cannot
     reach, the file is sent instead (only possible for some app types)."""
     token = _ig_token(acc)
@@ -514,8 +588,11 @@ def instagram_upload(acc, path: Path, caption: str, job_id: str = "", clip_name:
     auth = {"Authorization": f"Bearer {token}"}
     uid = acc["user_id"]
     if config.PUBLIC_URL.startswith("https://") and job_id:
-        box = _check(httpx.post(f"{base}/{uid}/media", data={"media_type": "REELS", "video_url": clip_link(job_id, clip_name or path.name),
-                                                           "caption": caption[:2200], "share_to_feed": "true"},
+        media_form = {"media_type": "REELS", "video_url": clip_link(job_id, clip_name or path.name),
+                      "caption": caption[:2200], "share_to_feed": "true"}
+        if cover_name and (path.parent / cover_name).is_file():
+            media_form["cover_url"] = clip_link(job_id, cover_name)
+        box = _check(httpx.post(f"{base}/{uid}/media", data=media_form,
                                 headers=auth, timeout=60), "Starting the Instagram post").json()
     else:
         box = _check(httpx.post(f"{base}/{uid}/media", data={"media_type": "REELS", "upload_type": "resumable",

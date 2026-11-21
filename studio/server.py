@@ -1363,6 +1363,10 @@ def put_settings(body: dict = Body(...)):
         accounts.save_settings(body)
     except (ValueError, TypeError) as e:
         raise HTTPException(400, str(e))
+    if isinstance(body.get("platform_prefs"), dict):
+        for plat in body["platform_prefs"]:
+            if plat in accounts.PLATFORM_NAMES:
+                posting.rebalance_platform(plat)
     return accounts.public_settings()
 
 
@@ -1440,23 +1444,28 @@ def connect_callback(platform: str, code: str = "", state: str = "", error: str 
     return _back(connected=platform, name=acc["name"])
 
 
-@app.get("/pub/{token}.mp4")
-def public_clip(token: str):
-    """A clip for a platform to fetch while posting it: one clip, one hour, signed (see accounts.clip_link)."""
+@app.get("/pub/{token}.{ext}")
+def public_clip(token: str, ext: str):
+    """A clip or cover for a platform to fetch while posting it: one file, one hour, signed (see accounts.clip_link)."""
+    if ext not in ("mp4", "jpg"):
+        raise HTTPException(404)
     got = accounts.read_clip_link(token)
     if not got:
         raise HTTPException(404)
     uid, job_id, name = got
+    if not name.endswith(f".{ext}"):
+        raise HTTPException(404)
     with ctx.as_user(uid):
         job = jobs.get(job_id) if re.fullmatch(r"[\w\-]{8,60}", job_id) else None
         f = Path(job["dir"]) / "clips" / name if job else None
-        if job and (not f or not f.is_file()):
+        if ext == "mp4" and job and (not f or not f.is_file()):
             clip = next((c for c in job.get("clips", []) if c.get("file") == name and c.get("drive")), None)
             if clip:
                 f = gdrive.ensure_local(job, clip)
     if not f or not f.is_file():
         raise HTTPException(404)
-    return FileResponse(f, media_type="video/mp4", headers={"Cache-Control": "private, no-store"})
+    mtype = "image/jpeg" if ext == "jpg" else "video/mp4"
+    return FileResponse(f, media_type=mtype, headers={"Cache-Control": "private, no-store"})
 
 
 # ---------------------------------------------------------------- where PeakCut keeps everything (Settings, Storage)

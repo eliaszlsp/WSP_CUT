@@ -15,14 +15,14 @@ def _root() -> Path:
 _lock = threading.RLock()
 
 DEFAULTS = {"name": "", "channel": "", "style": "bounce", "layout": "blur", "captions": True,
-            "output_lang": config.OUTPUT_LANG, "min_len": 15, "max_len": 60,
-            "max_clips": 6, "min_score": 80, "auto_watch": False, "buffer_min": 20, "live_per_hour": 4, "ai_every_min": 3, "ai_only_on_spike": True, "auto_jump_pct": 60,
+            "output_lang": config.OUTPUT_LANG, "min_len": 15, "max_len": 58,
+            "max_clips": 6, "min_score": 82, "auto_watch": False, "buffer_min": 20, "live_per_hour": 4, "ai_every_min": 3, "ai_only_on_spike": True, "auto_jump_pct": 60,
             "plan": "free", "decide_mode": "both", "must_clip_min": 0, "min_gap_min": 2,
             "game": "",
             "trigger_words": "clip that, clip it, clipa isso",
-            "autopost": False, "accounts": [], "post_min_score": 75, "post_gap_min": 45, "daily_cap": 6,
+            "autopost": False, "accounts": [], "post_min_score": 80, "post_gap_min": 90, "daily_cap": 12,
             "privacy": "public", "post_footer": "", "rate_per_1k": 0.0, "channels": {},
-            "long_enabled": False, "long_mode": "off", "long_min_len": 600, "long_max_len": 1200, "long_every_min": 20, "long_min_score": 70,
+            "long_enabled": False, "long_mode": "off", "long_min_len": 600, "long_max_len": 1200, "long_every_min": 20, "long_min_score": 78,
             "derive_shorts": True, "thumb_mode": "local",
             "series_enabled": False, "series_part_min": 60, "series_part_max": 90}
 PLATFORMS = ("youtube", "twitch", "kick")
@@ -46,7 +46,7 @@ def _fix(c: dict) -> dict:
         c["channel"] = next((ch[k] for k in PLATFORMS if k in ch), "")
     return c
 NUMERIC = {"min_len": (5, 120), "max_len": (10, 180), "max_clips": (1, 20), "min_score": (0, 100), "buffer_min": (5, 180), "live_per_hour": (1, 60), "ai_every_min": (1, 30), "auto_jump_pct": (20, 300), "must_clip_min": (0, 240), "min_gap_min": (0, 60),
-           "post_min_score": (0, 100), "post_gap_min": (5, 1440), "daily_cap": (1, 50),
+           "post_min_score": (0, 100), "post_gap_min": (5, 1440), "daily_cap": (0, 500),
            "long_min_len": (300, 1200), "long_max_len": (600, 1800), "long_every_min": (10, 120), "long_min_score": (0, 100),
            "series_part_min": (30, 150), "series_part_max": (45, 180)}
 

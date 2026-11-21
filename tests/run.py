@@ -102,7 +102,8 @@ def main() -> int:
                 ("long logs, the machine monitor, failed recordings, admin day totals", ["tests/test_robustness.py"]),
                 ("Google Drive archiving and SSD cleanup", ["tests/test_gdrive.py"]),
                 ("long videos, derived Shorts and magnetic thumbnails", ["tests/test_long_videos.py"]),
-                ("long video series", ["tests/test_long_series.py"])]
+                ("long video series", ["tests/test_long_series.py"]),
+                ("Home PT-BR, platform pause, 3-per-period cap and >5s music guard", ["tests/test_home_music_schedule.py"])]
         for name, args in runs:
             print(f"\n=== {name} ===", flush=True)
             r = subprocess.run([sys.executable, *args], cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace")

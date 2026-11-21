@@ -643,5 +643,23 @@ with patch.object(ai, "ready", return_value=True), \
     with Image.open(out_col) as im_col:
         check("collage thumb is 1280x720", im_col.size, (1280, 720))
 
+# ---- 10. Dedicated platform tabs (TikTok, YouTube, Instagram), per-platform prefs & copy-ready captions ----
+with ctx.as_user(UID):
+    accounts.save_settings({"platform_prefs": {"tiktok": {"gap_min": 150, "hashtags": "ViceLoop,#TikTokBR", "cta": "Comenta o que achou!"}}})
+    accounts.save_settings({"platform_prefs": {"youtube": {"gap_min": 95}}})
+    prefs = accounts.platform_prefs()
+    check("tiktok platform_prefs saved independently", (prefs["tiktok"]["gap_min"], prefs["tiktok"]["hashtags"]), (150, "ViceLoop,TikTokBR"))
+    check("youtube save keeps tiktok platform_prefs intact", (prefs["youtube"]["gap_min"], prefs["tiktok"]["gap_min"]), (95, 150))
+    cap_tt = posting._caption({"description": "Cena insana", "hashtags": ["GTA6"], "end": 30, "start": 0}, creators.DEFAULTS, "tiktok")
+    check("tiktok caption includes platform CTA and custom hashtag", ("Comenta o que achou!" in cap_tt, "#ViceLoop" in cap_tt), (True, True))
+    ov_full = posting.overview()
+    check("overview exposes platform_prefs and accounts", ("tiktok" in ov_full.get("platform_prefs", {}), isinstance(ov_full.get("accounts"), list)), (True, True))
+    if ov_full.get("posts"):
+        sample_p = ov_full["posts"][0]
+        check("overview post has caption_ready and hook fields", ("caption_ready" in sample_p, "hook" in sample_p), (True, True))
+
+for ui_marker in ("drawPlatformView", "platcfgsave", "copycap", "copytags", "PLAT_VIEWS"):
+    check(f"UI includes {ui_marker}", ui_marker in html_text, True)
+
 print(f"\nSummary: {len(fails)} failed" if fails else "\nALL PASSED")
 sys.exit(1 if fails else 0)

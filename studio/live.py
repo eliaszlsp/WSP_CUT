@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import alerts, auth, brain, config, creators, ctx, facecam, games, jobs, load, media, transcribe, usage
+from . import alerts, auth, brain, config, creators, ctx, facecam, games, jobs, load, media, quality, transcribe, usage
 
 # ":username!user@host PRIVMSG #channel :the message"
 _NICK = re.compile(r"(?m)^:([A-Za-z0-9_]{2,25})!")
@@ -221,7 +221,13 @@ class Session:
         for c in cands:
             if c.get("score", 0) < min_score:
                 continue
-            self._add_long_clip(c)
+            has_music, music_why = self._check_clip_music(None, c)
+            if has_music:
+                msg = f"Momento longo bloqueado por música >5s ({music_why or 'áudio musical'}): convertido em Shorts/Reels."
+                creators.log(self.job["creator"], msg)
+                self._convert_music_long_to_shorts(c, reason=music_why)
+            else:
+                self._add_long_clip(c)
             break
 
     def _find_facecam(self, src):
@@ -670,12 +676,17 @@ class Session:
                         b["end"] = round(b["end"] + buf_start, 2)
                         b["peak_t"] = round(b.get("peak_t", b["start"]) + buf_start, 2)
                         b["format"] = "16:9"
-                        self._add_long_clip(b)
+                        has_music, music_why = self._check_clip_music(None, b)
+                        if has_music:
+                            creators.log(self.job["creator"], f"Bloco longo final bloqueado por música >5s ({music_why}): convertido em Shorts/Reels.")
+                            self._convert_music_long_to_shorts(b, reason=music_why)
+                        else:
+                            self._add_long_clip(b)
         if long_mode in ("compile", "both"):
             avail = [
                 c for c in clips_copy
                 if c.get("format", "9:16") != "16:9" and c.get("clip_kind") not in ("long", "series")
-                and c.get("status") != "error"
+                and c.get("status") != "error" and not c.get("has_music")
                 and c["start"] >= buf_start - 2 and c["end"] <= buf_end + 2
             ]
             comp = brain.build_compilation(
@@ -685,8 +696,118 @@ class Session:
             if comp:
                 self._add_long_clip(comp)
 
+    def _check_clip_music(self, src_path: Path | None, clip: dict) -> tuple[bool, str]:
+        """Check whether a long clip contains >5s of music via AI flags, transcript cues, or audio spectrum."""
+        if clip.get("has_music"):
+            return True, str(clip.get("music_reason") or "Música (>5s) detectada pela IA")
+        with self.lock:
+            words_snap = list(self.words)
+        hit_t, _, why_t = quality.detect_music_transcript(words_snap, clip.get("start", 0.0), clip.get("end"))
+        if hit_t:
+            return True, why_t
+        if src_path and src_path.is_file():
+            wav = src_path.with_suffix(".music.wav")
+            try:
+                media.extract_audio(src_path, wav)
+                aud = media.load_audio(wav)
+                off = float(clip.get("src_offset", 0.0))
+                loc_words = [
+                    dict(w, s=round(w["s"] - off, 2), e=round(w["e"] - off, 2))
+                    for w in words_snap if clip["start"] - 1 <= w["s"] <= clip["end"] + 1
+                ]
+                loc_s = max(0.0, float(clip["start"]) - off)
+                loc_e = max(loc_s + 1.0, float(clip["end"]) - off)
+                res = quality.detect_music(words=loc_words, audio=aud, start=loc_s, end=loc_e, min_seconds=5.0)
+                if res.get("has_music"):
+                    return True, str(res.get("reason") or "Áudio musical (>5s)")
+            except Exception:  # noqa: BLE001
+                pass
+            finally:
+                wav.unlink(missing_ok=True)
+        return False, ""
+
+    def _convert_music_long_to_shorts(self, span_clip: dict, src_path: Path | None = None,
+                                      src_offset: float | None = None, src_end: float | None = None,
+                                      reason: str = ""):
+        """Convert a music-containing long segment into vertical 9:16 Shorts/Reels (max 58s each)."""
+        st = self.settings
+        out_lang = self.job["options"].get("output_lang") or st.get("output_lang") or config.OUTPUT_LANG
+        max_len = min(58, max(20, int(st.get("max_len", 60))))
+        min_len = min(max_len - 5, max(15, int(st.get("min_len", 15))))
+        with self.lock:
+            words_snap = list(self.words)
+            db_snap = list(self.db)
+        span_s, span_e = float(span_clip.get("start", 0.0)), float(span_clip.get("end", 0.0))
+        bw = [dict(w, s=round(w["s"] - span_s, 2), e=round(w["e"] - span_s, 2))
+              for w in words_snap if span_s <= w["s"] <= span_e]
+        picked = []
+        if len(bw) >= 8:
+            try:
+                s0, s1 = max(0, int(span_s)), min(len(db_snap), max(int(span_s) + 1, int(span_e) + 1))
+                seg_db = np.array(db_snap[s0:s1], dtype=np.float32) if s1 > s0 else np.zeros(int(max(1, span_e - span_s)), dtype=np.float32)
+                found, _ = brain.find_clips(
+                    bw, seg_db, max(1.0, span_e - span_s), self.job.get("title", ""), self.job.get("uploader", ""),
+                    max_clips=3, min_len=min_len, max_len=max_len, game=self._game(), output_lang=out_lang,
+                )
+                for sc in found:
+                    sc["start"] = round(span_s + sc["start"], 2)
+                    sc["end"] = round(span_s + sc["end"], 2)
+                    picked.append(sc)
+            except Exception:  # noqa: BLE001
+                picked = []
+        if not picked and bw:
+            picked = brain.split_series_parts(
+                words_snap, span_s, span_e,
+                base_title=span_clip.get("title") or self.job.get("title", ""),
+                base_hashtags=span_clip.get("hashtags") or [],
+                part_min=min(35, max_len - 10), part_max=max_len,
+                score=max(75, int(span_clip.get("score", 80))), game=self._game(), output_lang=out_lang,
+            )[:3]
+        if src_path is not None and src_offset is not None and src_end is not None:
+            if st.get("layout") == "gameplay" and not self.facecam_checked and src_path.is_file():
+                self.facecam_box = self._find_facecam(src_path)
+                self.facecam_checked = True
+            created = []
+            with self.lock:
+                for sc in picked[:3]:
+                    self.n += 1
+                    sc.update(
+                        id=f"clip{self.n:03d}",
+                        clip_kind="short",
+                        format="9:16",
+                        src=str(src_path),
+                        src_offset=src_offset,
+                        src_end=src_end,
+                        style=st["style"],
+                        layout=st["layout"],
+                        captions=self.job["options"].get("captions", True),
+                        output_lang=out_lang,
+                        has_music=True,
+                        music_reason=reason,
+                        status="queued",
+                        version=0,
+                        made_at=time.time(),
+                    )
+                    if self.facecam_box:
+                        sc["facecam"] = self.facecam_box
+                    self.job["clips"].append(sc)
+                    created.append(sc)
+            jobs.save(self.job)
+            for sc in created:
+                jobs.submit_live(lambda sc=sc: jobs.render_one(self.job, sc, list(self.words)))
+        else:
+            for sc in picked[:3]:
+                sc.update(format="9:16", has_music=True, music_reason=reason)
+                self._add_clip(sc)
+
     def _add_long_clip(self, c):
         self.n += 1
+        with self.lock:
+            s_i = max(0, int(c.get("start", 0)) + 15)
+            e_i = min(len(self.db), max(s_i + 1, int(c.get("end", 0)) - 15))
+            if e_i > s_i and not c.get("peak_t"):
+                seg_db = self.db[s_i:e_i]
+                c["peak_t"] = round(float(s_i + int(np.argmax(seg_db))), 2)
         c.update(id=f"clip{self.n:03d}", clip_kind="long", style="clean", layout="horizontal",
                  captions=False,
                  output_lang=self.job["options"].get("output_lang") or self.settings.get("output_lang") or config.OUTPUT_LANG,
@@ -694,7 +815,7 @@ class Session:
         with self.lock:
             self.job["clips"].append(c)
         jobs.save(self.job)
-        jobs.submit_live(lambda: self._render(c))
+        jobs.submit_live_long(lambda: self._render(c))
 
     def _spawn_series(self, long_clip):
         """Chop a finished long-form clip into sequential Part 1, Part 2... vertical clips from its .src.ts."""
@@ -775,9 +896,8 @@ class Session:
             return
         finally:
             lst.unlink(missing_ok=True)
-        # Only the gameplay layout uses a webcam, and only once the clip's own file is written: the
-        # webcam is looked for in it, once per stream.
-        if clip.get("layout") == "gameplay":
+        # Detect webcam once per stream for gameplay shorts AND long YouTube thumbnails.
+        if clip.get("layout") == "gameplay" or clip.get("clip_kind") == "long":
             if not self.facecam_checked:
                 self.facecam_box = self._find_facecam(src)
                 self.facecam_checked = True
@@ -789,6 +909,18 @@ class Session:
         clip.update(src=str(src), src_offset=round(offset, 2), src_end=round(offset + dur, 2))
         clip["start"] = max(clip["start"], clip["src_offset"])
         clip["end"] = min(clip["end"], clip["src_end"])
+        if clip.get("clip_kind") == "long":
+            has_music, music_why = self._check_clip_music(src, clip)
+            if has_music:
+                with self.lock:
+                    if clip in self.job["clips"]:
+                        self.job["clips"].remove(clip)
+                jobs.save(self.job)
+                creators.log(self.job["creator"], f"Bloco longo bloqueado por música >5s ({music_why or 'áudio musical'}): convertido apenas em Shorts/Reels.")
+                self._convert_music_long_to_shorts(
+                    clip, src_path=src, src_offset=clip["src_offset"], src_end=clip["src_end"], reason=music_why,
+                )
+                return
         jobs.render_one(self.job, clip, list(self.words))
         if clip.get("clip_kind") == "long" and clip.get("status") == "done" and self.settings.get("series_enabled"):
             self._spawn_series(clip)

@@ -355,7 +355,8 @@ def detect(path: str | Path, ask=None) -> dict | None:
     if looked and hinted:
         # The model is better than any measurement at saying "that is a person", and worse at saying
         # exactly where the lines are. So it picks which of the measured boxes it is, and only if it
-        # matches none of them is its own box measured and used.
+        # matches none of them is its own box measured and used. Never fall back to an unrelated box
+        # (like a QR code in the opposite corner) when the model pointed somewhere else.
         match = max(found, key=lambda c: _overlap(c, hinted)) if found else None
         if match and _overlap(match, hinted) >= MATCH:
             return _finish(path, match, w, h, still)

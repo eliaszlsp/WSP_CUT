@@ -20,7 +20,7 @@ import re
 # name, words that mean it, tags to put on the post
 GAMES: list[tuple[str, list[str], list[str]]] = [
     ("Grand Theft Auto VI", ["grand theft auto vi", "grand theft auto 6", "gta vi", "gta 6", "gta6"],
-     ["GTA6", "GTA6Game", "ViceCity", "RockstarGames", "GTA6Launch"]),
+     ["GTA6", "GTAVI", "GTA6Brasil", "ViceCity", "GTA6Gameplay", "RockstarGames", "GTA6Launch"]),
     ("Grand Theft Auto V", ["grand theft auto v", "grand theft auto 5", "gta online", "gta v", "gta 5", "gta5", "gtav"],
      ["GTA5", "GTAOnline", "RockstarGames", "GTA5RP"]),
     ("Grand Theft Auto IV", ["grand theft auto iv", "gta 4", "gta4"], ["GTA4", "RockstarGames"]),
@@ -95,3 +95,22 @@ def tags_of(game: str | None) -> list[str]:
         if g == _norm(name) or g in {_norm(a) for a in aliases} or g in {_norm(t) for t in tags}:
             return list(tags)
     return [re.sub(r"\W", "", str(game))[:30]] if re.sub(r"\W", "", str(game)) else []
+
+
+_MECHANICS_HINTS = {
+    "Grand Theft Auto VI": (
+        "Prioritize new/exotic GTA 6 mechanics and details: realistic physics, water/weather/destruction, "
+        "wildlife encounters, smart NPC/police AI reactions, in-game phone/social media, weapon wheel, "
+        "vehicle damage, minigames, Vice City secrets/easter eggs, funny bugs, and complete story missions."
+    ),
+}
+
+
+def mechanics_hint(game: str | None) -> str:
+    """Extra focus hint for discovering exciting mechanics, secrets, and exotic interactions in this game."""
+    name = name_of(game)
+    return _MECHANICS_HINTS.get(
+        name,
+        "Prioritize new, surprising, funny, or exotic game mechanics, hidden details, easter eggs, "
+        "weird physics/AI reactions, and moments where the streamer says 'look at this' or tests what the game lets you do.",
+    )

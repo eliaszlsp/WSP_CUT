@@ -162,6 +162,12 @@ with ctx.as_user(user.id):
 anon = TestClient(server.app, base_url=BASE)
 path = urlparse(link).path
 check("a signed link serves the clip to anyone, no sign-in", (anon.get(path).status_code, len(anon.get(path).content)), (200, 6000))
+(jd / "clip01.jpg").write_bytes(b"\xff\xd8\xff\xe0jpg")
+with ctx.as_user(user.id):
+    jpg_link = accounts.clip_link("job-12345678", "clip01.jpg")
+jpg_path = urlparse(jpg_link).path
+check("a signed jpg cover link serves image/jpeg", (anon.get(jpg_path).status_code, anon.get(jpg_path).headers["content-type"].startswith("image/jpeg")), (200, True))
+check("mismatched ext on signed jpg link returns 404", anon.get(jpg_path[:-4] + ".mp4").status_code, 404)
 bad = path.replace(".mp4", "x.mp4")
 check("a changed link does not", anon.get(bad).status_code, 404)
 check("a made-up link does not", anon.get("/pub/abc.def.mp4").status_code, 404)
@@ -173,9 +179,9 @@ check("an expired link does not", anon.get(urlparse(old).path).status_code, 404)
 with ctx.as_user(user.id):
     ig, ttacc = accounts.get(accs["instagram"]["id"]), accounts.get(accs["tiktok"]["id"])
     calls.clear()
-    rid, url = accounts.instagram_upload(ig, jd / "clip01.mp4", "My caption", "job-12345678")
+    rid, url = accounts.instagram_upload(ig, jd / "clip01.mp4", "My caption", "job-12345678", cover_name="clip01.jpg")
     made = next(c for c in calls if c[1].endswith("/17841/media"))
-    check("Instagram: a Reel from the signed link", (made[2]["media_type"], made[2]["video_url"].startswith(BASE + "/pub/")), ("REELS", True))
+    check("Instagram: a Reel from the signed link", (made[2]["media_type"], made[2]["video_url"].startswith(BASE + "/pub/"), made[2].get("cover_url", "").endswith(".jpg")), ("REELS", True, True))
     check("Instagram: published, with its link", (rid, url), ("media1", "https://www.instagram.com/reel/abc/"))
 
     uploads.clear(); tt.update(audited=False, status=0)

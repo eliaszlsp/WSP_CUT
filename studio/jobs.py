@@ -101,7 +101,8 @@ class _FairQueue:
 
 
 _q = _FairQueue()
-_live_q: "queue.Queue" = queue.Queue()   # live clips never wait behind a long video
+_live_q: "queue.Queue" = queue.Queue()       # live short clips never wait behind a long video
+_live_long_q: "queue.Queue" = queue.Queue()  # long 10-20 min live renders run on their own worker
 _jobs: dict = {}
 _by_user: dict = {}                       # user -> {job id: job}: listing one person's videos never scans everyone's
 _lock = threading.RLock()
@@ -345,13 +346,27 @@ def submit(fn):
 
 
 def submit_live(fn):
-    """Live-stream renders and cleanups: their own worker, so a long video can never hold them up."""
+    """Live-stream short renders and cleanups: their own worker, so a long video can never hold them up."""
     _live_q.put(ctx.bind(fn))
+
+
+def submit_live_long(fn):
+    """Long 10-20 min live renders: separate worker so short clips render immediately."""
+    _live_long_q.put(ctx.bind(fn))
 
 
 def _live_worker():
     while True:
         fn = _live_q.get()
+        try:
+            fn()
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+
+
+def _live_long_worker():
+    while True:
+        fn = _live_long_q.get()
         try:
             fn()
         except Exception:  # noqa: BLE001
@@ -444,13 +459,14 @@ def render_one(job, clip, words):
         need_caps = False if is_16_9 else clip.get("captions", True)
         near = _caption_words(job, clip, words, off) if need_caps else []
         out = render.render_clip(src, d / "clips", clip["id"], local, near, job["width"], job["height"])
-        clip.update(out, status="done", version=clip.get("version", 0) + 1, error=None)
+        now_ts = time.time()
+        clip.update(out, status="done", version=clip.get("version", 0) + 1, error=None, rendered_at=now_ts)
         if clip["version"] > 1:
             clip.pop("drive", None)
         post = {k: clip[k] for k in ("title", "description", "hashtags", "hook", "start", "end", "score")}
         (d / "clips" / f"{clip['id']}.json").write_text(json.dumps(post, indent=1), encoding="utf-8")
         if clip["version"] == 1:
-            clip.setdefault("made_at", time.time())
+            clip.setdefault("made_at", now_ts)
             creators.log(job["creator"], f"Clip ready (score {clip['score']}): {clip['title'] or clip['hook']}")
             save(job)
             for fn in on_clip_ready:
@@ -840,7 +856,7 @@ def _run_job(job):
         job["ai"] = {"model": model, "tokens": tokens, "note": "", "log": notes[-5:]}
         job["done_blocks"] = bi + 1       # a restart from here on carries on with the next part
         save(job)
-    long_enq, long_tok, long_model = _apply_long_and_derived(job, words, db, span, lo, game, notes, face=face)
+    long_enq, long_tok, long_model = _apply_long_and_derived(job, words, db, span, lo, game, notes, face=face, audio=audio)
     tokens += long_tok
     model = long_model or model
     for c in long_enq:
@@ -874,7 +890,78 @@ def _run_job(job):
     creators.log(job["creator"], f"Video finished with {len(clips)} clips in {round(time.time() - t0)}s: {job['title']}")
 
 
-def _apply_long_and_derived(job, words, db, span, lo, game, notes, face=None):
+def _span_has_music(words, audio, start: float, end: float, candidate: dict | None = None) -> tuple[bool, str]:
+    if candidate and candidate.get("has_music"):
+        return True, str(candidate.get("music_reason") or "Música (>5s) detectada pela IA")
+    res = quality.detect_music(words=words, audio=audio, start=start, end=end, min_seconds=5.0)
+    return bool(res.get("has_music")), str(res.get("reason") or "")
+
+
+def _spawn_shorts_for_span(job, words, db, lo, span_start: float, span_end: float, base_title: str,
+                           base_hashtags: list, game, notes: list, face=None, reason: str = "") -> tuple[list, int, str | None]:
+    """Create 9:16 Shorts/Reels from a segment blocked from long upload due to >5s music."""
+    o = job["options"]
+    out_lang = o.get("output_lang", config.OUTPUT_LANG)
+    shift_lo = lo / 16000
+    max_short_len = min(60, max(15, int(o.get("max_len", 60))))
+    min_short_len = min(max_short_len - 5, max(10, int(o.get("min_len", 15))))
+    short_cap = min(3, max(1, int(o.get("max_clips", 6))))
+    existing = [
+        c for c in job["clips"]
+        if c.get("format", "9:16") != "16:9" and c.get("clip_kind") != "long"
+        and c["start"] >= span_start - 2 and c["end"] <= span_end + 2
+    ]
+    if existing:
+        for c in existing:
+            c["has_music"] = True
+        return [], 0, None
+    bw = [
+        dict(w, s=round(w["s"] - span_start, 2), e=round(w["e"] - span_start, 2))
+        for w in words if span_start <= w["s"] <= span_end
+    ]
+    created_raw, tok, model = [], 0, None
+    if len(bw) >= 8:
+        s0 = max(0, int(span_start - shift_lo))
+        s1 = min(len(db), int(span_end - shift_lo) + 1)
+        found, ai_sub = brain.find_clips(
+            bw, db[s0:s1], span_end - span_start, job.get("title", ""), job.get("uploader", ""),
+            short_cap, min_short_len, max_short_len, notes.append, game=game, output_lang=out_lang,
+        )
+        tok += ai_sub.get("tokens", 0)
+        model = ai_sub.get("model") or model
+        for sc in found:
+            sc["start"] = round(sc["start"] + span_start, 2)
+            sc["end"] = round(sc["end"] + span_start, 2)
+            created_raw.append(sc)
+    if not created_raw and bw:
+        parts = brain.split_series_parts(
+            words, span_start, span_end, base_title=base_title, base_hashtags=base_hashtags,
+            part_min=min(40, max_short_len - 10), part_max=max_short_len,
+            score=80, game=game, output_lang=out_lang,
+        )[:short_cap]
+        created_raw.extend(parts)
+    enqueued = []
+    for sc in created_raw[:short_cap]:
+        sc.update(
+            id=f"clip{len(job['clips']) + 1:02d}",
+            style=o["style"],
+            layout=o["layout"],
+            format="9:16",
+            has_music=True,
+            music_reason=reason,
+            captions=o.get("captions", True),
+            output_lang=out_lang,
+            status="queued",
+            version=0,
+        )
+        if face:
+            sc["facecam"] = face
+        job["clips"].append(sc)
+        enqueued.append(sc)
+    return enqueued, tok, model
+
+
+def _apply_long_and_derived(job, words, db, span, lo, game, notes, face=None, audio=None):
     """Generate 16:9 long blocks, derived 9:16 Shorts (parent_clip), and 16:9 compilations after blocks finish."""
     o = job["options"]
     long_mode = o.get("long_mode", "off")
@@ -899,17 +986,36 @@ def _apply_long_and_derived(job, words, db, span, lo, game, notes, face=None):
         model = ai_long.get("model") or model
         if ai_long.get("note"):
             notes.append(ai_long["note"])
-        for idx, b in enumerate(blocks, 1):
+        long_idx = 0
+        for b in blocks:
+            abs_s = round(b["start"] + shift_lo, 2)
+            abs_e = round(b["end"] + shift_lo, 2)
+            has_music, music_why = _span_has_music(words, audio, abs_s, abs_e, b)
+            if has_music:
+                msg = f"Bloco longo ({round(abs_s)}-{round(abs_e)}s) contém música >5s ({music_why or 'áudio musical'}): convertido apenas em Shorts/Reels."
+                notes.append(msg)
+                creators.log(job["creator"], msg)
+                sp_enq, sp_tok, sp_mod = _spawn_shorts_for_span(
+                    job, words, db, lo, abs_s, abs_e,
+                    b.get("title") or job.get("title", ""), b.get("hashtags") or [],
+                    game, notes, face=face, reason=music_why,
+                )
+                enqueued.extend(sp_enq)
+                tokens += sp_tok
+                model = sp_mod or model
+                continue
+            long_idx += 1
             b.update(
-                id=f"long{idx:02d}",
-                start=round(b["start"] + shift_lo, 2),
-                end=round(b["end"] + shift_lo, 2),
+                id=f"long{long_idx:02d}",
+                start=abs_s,
+                end=abs_e,
                 peak_t=round(b.get("peak_t", b["start"]) + shift_lo, 2),
                 style="clean",
                 layout="horizontal",
                 format="16:9",
                 clip_kind="long",
                 long_type="block",
+                has_music=False,
                 captions=False,
                 output_lang=out_lang,
                 thumb_mode=o.get("thumb_mode", "local"),
@@ -964,10 +1070,16 @@ def _apply_long_and_derived(job, words, db, span, lo, game, notes, face=None):
                             job["clips"].append(sc)
                             enqueued.append(sc)
     if long_mode in ("compile", "both"):
-        short_cands = [
-            c for c in job["clips"]
-            if c.get("format", "9:16") != "16:9" and c.get("clip_kind") != "long" and c.get("status") != "error"
-        ]
+        short_cands = []
+        for c in job["clips"]:
+            if c.get("format", "9:16") != "16:9" and c.get("clip_kind") != "long" and c.get("status") != "error":
+                hm, hw = _span_has_music(words, audio, c["start"], c["end"], c)
+                if hm:
+                    c["has_music"] = True
+                    if hw:
+                        c["music_reason"] = hw
+                    continue
+                short_cands.append(c)
         comp = brain.build_compilation(
             short_cands, title=job["title"], uploader=job["uploader"],
             min_len=long_min_len, max_len=long_max_len, game=game, output_lang=out_lang,
@@ -980,6 +1092,7 @@ def _apply_long_and_derived(job, words, db, span, lo, game, notes, face=None):
                 format="16:9",
                 clip_kind="long",
                 long_type="compile",
+                has_music=False,
                 captions=False,
                 output_lang=out_lang,
                 thumb_mode=o.get("thumb_mode", "local"),
@@ -1051,3 +1164,4 @@ def start():
         threading.Thread(target=_worker, daemon=True).start()
     threading.Thread(target=_worker, args=(True,), daemon=True).start()   # re-making a single clip never waits behind whole videos
     threading.Thread(target=_live_worker, daemon=True).start()
+    threading.Thread(target=_live_long_worker, daemon=True).start()
