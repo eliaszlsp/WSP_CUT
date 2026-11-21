@@ -4,20 +4,20 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<title>PeakCut Admin</title>
+<title>VICE CUT AI Admin</title>
 <link rel="icon" type="image/svg+xml" href="/brand/favicon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root{
-  --brand:#FF8B33;--brand-press:#F27A1F;--brand-ink:#2A1A12;--brand-soft:#FFF2E8;--brand-line:#FFD9BC;--brand-deep:#A9480A;
-  --frame:#1E1612;--frame-2:#2C221D;--frame-line:rgba(255,255,255,.08);--frame-text:#F4EEEA;--frame-dim:#A99A91;
-  --bg:#FFFFFF;--muted:#F7F4F1;--line:#EEE8E4;--line-2:#E1D9D3;
-  --text:#211813;--dim:#6D6159;--faint:#A0948C;
-  --good:#0F8A57;--good-soft:#E6F6EE;--bad:#D3343F;--bad-soft:#FDECEE;
+  --brand:#FF2E93;--brand-press:#E01174;--brand-ink:#FFF3EC;--brand-soft:rgba(255,46,147,.16);--brand-line:rgba(255,46,147,.38);--brand-deep:#36E2D0;
+  --frame:#070510;--frame-2:#120D22;--frame-line:rgba(166,161,177,.12);--frame-text:#FFF3EC;--frame-dim:#9E97B4;
+  --bg:#0C0918;--surface:#130E24;--muted:#1A1430;--line:#251D42;--line-2:#34295A;
+  --text:#F5F0FF;--dim:#A69FBC;--faint:#756C90;
+  --good:#36E2D0;--good-soft:rgba(54,226,208,.14);--bad:#FF4D6A;--bad-soft:rgba(255,77,106,.16);
   --r-lg:16px;--r:12px;--r-sm:8px;
-  color-scheme:light;
+  color-scheme:dark;
 }
 *{box-sizing:border-box}
 [hidden]{display:none!important}
@@ -39,8 +39,8 @@ svg{width:18px;height:18px;flex:none;fill:currentColor}
 .nav-item{display:flex;align-items:center;gap:10px;width:100%;min-height:34px;padding:0 10px;border-radius:7px;border:0;background:transparent;color:var(--frame-text);font-size:14px;font-weight:500;cursor:pointer;text-align:left;text-decoration:none;transition:background-color .15s ease,color .15s ease}
 .nav-item svg{width:17px;height:17px;color:var(--frame-dim)}
 .nav-item:hover{background:var(--frame-2)}
-.nav-item.on{background:var(--brand);color:var(--brand-ink);font-weight:600}
-.nav-item.on svg{color:var(--brand-ink)}
+.nav-item.on{background:var(--brand);color:#FFFFFF;font-weight:600}
+.nav-item.on svg{color:#FFFFFF}
 .nav-item .label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .count{font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;background:rgba(255,255,255,.1);color:var(--frame-text)}
 .nav-item.on .count{background:rgba(42,26,18,.14);color:var(--brand-ink)}
@@ -56,21 +56,21 @@ main{background:var(--bg);margin:8px 8px 8px 0;border-radius:var(--r-lg);height:
 .content{padding:22px 28px 60px;max-width:1320px}
 
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:38px;padding:0 14px;border-radius:var(--r);border:1px solid var(--line-2);background:#fff;color:var(--text);cursor:pointer;text-decoration:none;white-space:nowrap;font-weight:600;transition:background-color .15s ease,border-color .15s ease,color .15s ease}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:38px;padding:0 14px;border-radius:var(--r);border:1px solid var(--line-2);background:var(--surface);color:var(--text);cursor:pointer;text-decoration:none;white-space:nowrap;font-weight:600;transition:background-color .15s ease,border-color .15s ease,color .15s ease}
 .btn:hover{background:var(--muted)}
-.btn.primary{background:var(--brand);border-color:var(--brand);color:var(--brand-ink)}
-.btn.primary:hover{background:#FF9A4C;border-color:#FF9A4C}
+.btn.primary{background:var(--brand);border-color:var(--brand);color:#FFFFFF}
+.btn.primary:hover{background:#FF54A8;border-color:#FF54A8}
 .btn.primary:disabled{background:#F3E7DD;border-color:#F3E7DD;color:#B9A597;cursor:not-allowed}
 .btn.danger{background:var(--bad-soft);border-color:transparent;color:var(--bad)}
 .btn.danger:hover{background:#FADDE0}
 .btn.sm{height:32px;padding:0 11px;font-size:13px;gap:6px}
 .btn.sm svg{width:16px;height:16px}
-input[type=text],input[type=search],input[type=number],textarea{height:38px;padding:0 12px;border-radius:var(--r);border:1px solid var(--line-2);background:#fff;width:100%;transition:border-color .15s ease}
+input[type=text],input[type=search],input[type=number],textarea{height:38px;padding:0 12px;border-radius:var(--r);border:1px solid var(--line-2);background:var(--surface);width:100%;transition:border-color .15s ease}
 input:hover,textarea:hover{border-color:#CFC4BC}
 input:focus,textarea:focus{outline:0;border-color:var(--brand)}
 label.f{display:flex;flex-direction:column;gap:7px;font-size:12px;color:var(--dim);font-weight:600}
 
-.card{background:#fff;border:1px solid var(--line);border-radius:var(--r);padding:22px;margin-bottom:16px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:22px;margin-bottom:16px}
 .card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:18px}
 .card-head h2{font-size:15px;font-weight:600;color:var(--brand-ink)}
 .help,.sub{color:var(--dim);font-size:13px}
@@ -83,7 +83,7 @@ label.f{display:flex;flex-direction:column;gap:7px;font-size:12px;color:var(--di
 .empty b{display:block;color:var(--brand-ink);font-size:15px;margin-bottom:2px}
 
 .tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin-bottom:16px}
-.tile{background:#fff;border:1px solid var(--line);border-radius:var(--r);padding:16px 18px;display:flex;flex-direction:column;min-width:0}
+.tile{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:16px 18px;display:flex;flex-direction:column;min-width:0}
 .tile i{width:32px;height:32px;border-radius:var(--r-sm);background:var(--brand-soft);color:var(--brand-deep);display:grid;place-items:center;margin-bottom:14px}
 .tile b{font-size:26px;font-weight:600;letter-spacing:-.03em;font-variant-numeric:tabular-nums;color:var(--brand-ink);line-height:1.1}
 .tile span{font-size:13px;color:var(--dim);margin-top:2px}
@@ -109,17 +109,17 @@ td{padding:12px 10px;border-top:1px solid var(--line);vertical-align:middle}
 td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 td.acts{text-align:right;white-space:nowrap}
 tr.u{cursor:pointer}
-tr.u:hover>td{background:#FCFAF8}
+tr.u:hover>td{background:#18122C}
 td .em{font-size:12px;color:var(--dim);overflow-wrap:anywhere}
 td b{color:var(--brand-ink);font-weight:600}
 .toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:16px}
 .toolbar input{max-width:340px}
 .seg{display:flex;gap:2px;padding:3px;background:var(--muted);border-radius:11px}
 .seg button{height:32px;padding:0 12px;border:0;border-radius:8px;background:transparent;color:var(--dim);font-size:13px;font-weight:600;cursor:pointer;transition:background-color .15s ease,color .15s ease}
-.seg button:hover{background:#EDE3DB;color:var(--text)}
-.seg button.on{background:var(--brand);color:var(--brand-ink)}
+.seg button:hover{background:#231B3E;color:var(--text)}
+.seg button.on{background:var(--brand);color:#FFFFFF}
 
-dialog{border:1px solid var(--line);background:#fff;color:var(--text);border-radius:var(--r-lg);padding:0;max-width:calc(100vw - 32px)}
+dialog{border:1px solid var(--line);background:var(--surface);color:var(--text);border-radius:var(--r-lg);padding:0;max-width:calc(100vw - 32px)}
 dialog::backdrop{background:rgba(14,12,11,.42)}
 .dlg{padding:24px;width:460px;max-width:100%;display:flex;flex-direction:column;gap:14px}
 .dlg.wide{width:720px;max-height:calc(100vh - 48px);overflow:auto}
@@ -130,7 +130,7 @@ dialog::backdrop{background:rgba(14,12,11,.42)}
 .facts div{background:var(--muted);border-radius:var(--r-sm);padding:10px 12px}
 .facts b{display:block;font-size:17px;color:var(--brand-ink);font-variant-numeric:tabular-nums}
 .facts span{font-size:12px;color:var(--dim)}
-.note{background:var(--brand-soft);color:#7A3E0C;border-radius:var(--r-sm);padding:10px 12px;font-size:13px}
+.note{background:var(--brand-soft);color:#FFF3EC;border-radius:var(--r-sm);padding:10px 12px;font-size:13px}
 #toasts{position:fixed;right:20px;bottom:20px;display:flex;flex-direction:column;gap:8px;z-index:50}
 .toast{background:var(--frame);color:var(--frame-text);border:1px solid var(--frame-2);border-radius:var(--r);padding:12px 16px;max-width:380px;display:flex;gap:10px;align-items:center;font-weight:500}
 .toast::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--brand);flex:none}
@@ -164,7 +164,7 @@ dialog::backdrop{background:rgba(14,12,11,.42)}
 <body>
 <div class="app">
   <aside class="side" aria-label="Sidebar">
-    <div class="side-head"><img class="logo" src="/brand/logo-light.svg" alt="PeakCut"></div>
+    <div class="side-head"><img class="logo" src="/brand/logo-light.svg" alt="VICE CUT AI"></div>
     <nav class="nav" id="nav" aria-label="Admin"></nav>
     <div class="side-foot" id="foot"></div>
   </aside>
@@ -216,7 +216,7 @@ function toast(msg, kind = "") {
 }
 
 const S = {tab:"overview", data:null, me:null, q:"", filter:"all", sort:"created_at", fb:null, fbStatus:"new"};
-const TABS = {overview:["Overview", "home", "Sign-ups, videos and AI use across this PeakCut server."],
+const TABS = {overview:["Overview", "home", "Sign-ups, videos and AI use across this VICE CUT AI server."],
               users:["Users", "users", "Every account. Open one to see how much it uses the AI."],
               feedback:["Feedback", "chat", "Bug reports, feature ideas and other messages from users."],
               activity:["Activity", "clock", "Everything admins have done, newest first."]};
@@ -321,7 +321,7 @@ function drawFeedback() {
       <p class="fbmsg">${esc(x.message)}</p>${x.context ? `<p class="fbctx">${esc(x.context)}</p>` : ""}
       <div class="row">${x.status !== "seen" ? `<button class="btn sm" data-act="fbset" data-id="${x.id}" data-s="seen">Mark seen</button>` : ""}
         ${x.status !== "done" ? `<button class="btn sm" data-act="fbset" data-id="${x.id}" data-s="done">${ic("check")}Done</button>` : `<button class="btn sm" data-act="fbset" data-id="${x.id}" data-s="new">Reopen</button>`}
-        ${x.email ? `<a class="btn sm" href="mailto:${esc(x.email)}?subject=${encodeURIComponent("About your PeakCut feedback")}">Reply by email</a>` : ""}</div></div>`).join("")
+        ${x.email ? `<a class="btn sm" href="mailto:${esc(x.email)}?subject=${encodeURIComponent("About your VICE CUT AI feedback")}">Reply by email</a>` : ""}</div></div>`).join("")
       : `<div class="card"><div class="empty"><b>Nothing here</b>${S.fbStatus === "new" ? "No new messages. Everything has been looked at." : "Messages appear here as users send them."}</div></div>`}`;
 }
 async function loadFeedback() {
