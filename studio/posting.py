@@ -61,41 +61,241 @@ def _mirror(p):
         jobs.save(job)
 
 
-def _next_slot(account_id, gap_min, cap):
-    """Earliest time that respects the gap between posts and the daily cap for this account."""
+PLATFORM_CAPS = {"tiktok": 14}               # TikTok ~15/24h OpenAPI limit
+PLATFORM_GAPS = {"tiktok": 120, "instagram": 90, "youtube": 90}  # increased post-hype spacing across platforms
+SHORT_PERIOD_CAP = 2                         # Shorts/Reels: max 2 per active 6h period (1 at night + 2*3 daytime = 7/day)
+_PERIOD_SHORT_CAPS = (1, 2, 2, 2)            # Madrugada (00-06): 1, Manhã (06-12): 2, Tarde (12-18): 2, Noite (18-24): 2
+LONG_DAILY_CAP = 2                           # Long 16:9 YouTube videos: max 2 per day so Longs never starve Shorts
+
+_PERIOD_START_HOURS = ((0, 30), (8, 30), (14, 0), (19, 0))  # Madrugada 00:30, Manhã 08:30 (pico 08-11h), Tarde 14:00, Noite 19:00
+
+
+def _period_cap(p_idx: int) -> int:
+    if SHORT_PERIOD_CAP <= 0:
+        return 0
+    if 0 <= p_idx < len(_PERIOD_SHORT_CAPS):
+        return min(SHORT_PERIOD_CAP, _PERIOD_SHORT_CAPS[p_idx])
+    return SHORT_PERIOD_CAP
+
+
+def _period_info(t: float) -> tuple[str, float]:
+    """Return (YYYY-MM-DD:period_idx, next_period_start_ts) for 6h local windows (00-06, 06-12, 12-18, 18-24)."""
+    lt = time.localtime(t)
+    p_idx = lt.tm_hour // 6
+    day = time.strftime("%Y-%m-%d", lt)
+    if p_idx < 3:
+        nh, nm = _PERIOD_START_HOURS[p_idx + 1]
+        nxt = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, nh, nm, 0, 0, 0, -1))
+    else:
+        nh, nm = _PERIOD_START_HOURS[0]
+        lt2 = time.localtime(t + 86400)
+        nxt = time.mktime((lt2.tm_year, lt2.tm_mon, lt2.tm_mday, nh, nm, 0, 0, 0, -1))
+    return f"{day}:{p_idx}", nxt
+
+
+def _is_short_post(p: dict) -> bool:
+    if p.get("format") == "16:9" or p.get("priority") == 1:
+        return False
+    return not _is_long_post(p)
+
+
+def _is_music_blocked_long(clip: dict) -> bool:
+    is_long = clip.get("clip_kind") == "long" or clip.get("format") == "16:9" or (clip.get("end", 0) - clip.get("start", 0)) > 180
+    return bool(is_long and clip.get("has_music"))
+
+
+def _next_slot(account_id, gap_min, cap, platform="", is_short=True):
+    """Earliest time respecting account gap, daily/24h cap, and 3 Shorts/Reels per 6h period."""
     mine = [p for p in _mine() if p["account"] == account_id and p["status"] in OPEN + ("posted",)]
-    t = max(time.time(), max((p.get("posted_at") or p["due_at"] for p in mine), default=0) + gap_min * 60)
-    for _ in range(30):
-        if sum(1 for p in mine if _day(p.get("posted_at") or p["due_at"]) == _day(t)) < cap:
+    eff_gap = max(gap_min, PLATFORM_GAPS.get(platform, 0))
+    t = max(time.time(), max((p.get("posted_at") or p["due_at"] for p in mine), default=0) + eff_gap * 60)
+    plat_cap = PLATFORM_CAPS.get(platform, 0)
+    eff_cap = min(cap, plat_cap) if (cap and cap > 0 and plat_cap) else (plat_cap or cap)
+    short_mine = [p for p in mine if _is_short_post(p)] if is_short else []
+    for _ in range(48):
+        moved = False
+        if eff_cap and eff_cap > 0:
+            if platform == "tiktok":
+                win = [p.get("posted_at") or p["due_at"] for p in mine if t - (p.get("posted_at") or p["due_at"]) < 86400]
+                if len(win) >= eff_cap:
+                    t = max(t, min(win) + 86400 + 120)
+                    moved = True
+            else:
+                if sum(1 for p in mine if _day(p.get("posted_at") or p["due_at"]) == _day(t)) >= eff_cap:
+                    lt = time.localtime(t + 86400)
+                    t = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 6, 0, 0, 0, 0, -1))
+                    moved = True
+        if not moved and is_short and SHORT_PERIOD_CAP > 0:
+            pk, nxt_p = _period_info(t)
+            p_cap = _period_cap(int(pk.rsplit(":", 1)[-1]))
+            if p_cap > 0 and sum(1 for p in short_mine if _period_info(p.get("posted_at") or p["due_at"])[0] == pk) >= p_cap:
+                t = max(t, nxt_p)
+                moved = True
+        if not moved and not is_short and platform == "youtube" and LONG_DAILY_CAP > 0:
+            long_mine = [p for p in mine if not _is_short_post(p)]
+            if sum(1 for p in long_mine if _day(p.get("posted_at") or p["due_at"]) == _day(t)) >= LONG_DAILY_CAP:
+                lt = time.localtime(t + 86400)
+                t = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 12, 0, 0, 0, 0, -1))
+                moved = True
+        if not moved:
             break
-        lt = time.localtime(t + 86400)
-        t = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 9, 0, 0, 0, 0, -1))  # 9:00 next day
     return t
 
 
 def platform_gap(platform: str, gap_min: int) -> int:
     """Minimum safe gap in minutes between posts on a given platform."""
-    if platform in ("tiktok", "instagram"):
-        return max(30, int(gap_min))
-    if platform == "youtube":
-        return max(20, int(gap_min))
+    if platform == "tiktok":
+        return max(120, int(gap_min))
+    if platform in ("instagram", "youtube"):
+        return max(90, int(gap_min))
     return max(5, int(gap_min))
 
 
 def clip_priority(clip: dict) -> int:
     """Queue priority: 1 for 16:9 long video, 2 for derived short, 3 for standalone clip."""
-    if clip.get("format") == "16:9":
+    if clip.get("format") == "16:9" or clip.get("clip_kind") == "long":
         return 1
     if clip.get("parent_clip"):
         return 2
     return 3
 
 
+def _is_long_post(p) -> bool:
+    with ctx.as_user(p["user"]):
+        job = jobs.get(p["job"])
+        clip = next((c for c in job["clips"] if c["id"] == p["clip"]), None) if job else None
+    if not clip:
+        return False
+    return clip.get("clip_kind") == "long" or (clip.get("end", 0) - clip.get("start", 0)) >= 180
+
+
+def _interleave_by_creator(items: list[dict]) -> list[dict]:
+    """Order items round-robin across creators while preserving each creator's internal/series order."""
+    buckets: dict[str, list[dict]] = {}
+    for p in items:
+        buckets.setdefault(p.get("creator") or "", []).append(p)
+    for q in buckets.values():
+        q.sort(key=lambda x: (x.get("series_id") or "", x.get("part_index") or 0, x.get("created", 0)))
+    out = []
+    order = list(buckets.keys())
+    while order:
+        nxt_order = []
+        for cid in order:
+            q = buckets[cid]
+            if q:
+                out.append(q.pop(0))
+            if q:
+                nxt_order.append(cid)
+        order = nxt_order
+    return out
+
+
+def rebalance_account(account_id: str, gap_min: int = 90, cap: int = 12):
+    """Re-slot scheduled posts: interleave up to LONG_DAILY_CAP (2) Long videos/day with Shorts/Reels (7/day across periods)."""
+    with _lock:
+        mine = _mine()
+        sched = [p for p in mine if p["account"] == account_id and p["status"] == "scheduled"]
+        if len(sched) <= 1:
+            return
+        posted = [p for p in mine if p["account"] == account_id and p["status"] in ("posting", "posted")]
+        platform = (accounts.get(account_id) or {}).get("platform") or (sched[0].get("platform") or "")
+        eff_gap = max(gap_min, PLATFORM_GAPS.get(platform, 0))
+        plat_cap = PLATFORM_CAPS.get(platform, 0)
+        eff_cap = min(cap, plat_cap) if (cap and cap > 0 and plat_cap) else (plat_cap or cap)
+        longs = _interleave_by_creator([p for p in sched if _is_long_post(p)])
+        shorts = _interleave_by_creator([p for p in sched if not _is_long_post(p)])
+        ordered = []
+        li, si = 0, 0
+        long_batch = max(1, LONG_DAILY_CAP)
+        short_batch = max(1, sum(_PERIOD_SHORT_CAPS))
+        while li < len(longs) or si < len(shorts):
+            ordered.extend(longs[li:li + long_batch])
+            li += long_batch
+            ordered.extend(shorts[si:si + short_batch])
+            si += short_batch
+        last_t = max((p.get("posted_at") or p["due_at"] for p in posted), default=0)
+        base_t = max(time.time(), last_t + eff_gap * 60) if last_t else time.time()
+        t_short = base_t
+        t_long = base_t
+        day_counts: dict[str, int] = {}
+        long_day_counts: dict[str, int] = {}
+        period_counts: dict[str, int] = {}
+        win_times: list[float] = []
+        used_slots: list[float] = []
+        for p in posted:
+            pt = p.get("posted_at") or p["due_at"]
+            d = _day(pt)
+            day_counts[d] = day_counts.get(d, 0) + 1
+            if _is_short_post(p):
+                pk = _period_info(pt)[0]
+                period_counts[pk] = period_counts.get(pk, 0) + 1
+            else:
+                long_day_counts[d] = long_day_counts.get(d, 0) + 1
+            win_times.append(pt)
+            used_slots.append(pt)
+        for p in ordered:
+            is_short = _is_short_post(p)
+            t = t_short if is_short else t_long
+            for _ in range(90):
+                moved = False
+                for u in sorted(used_slots):
+                    if abs(t - u) < eff_gap * 60:
+                        t = u + eff_gap * 60
+                        moved = True
+                if eff_cap and eff_cap > 0:
+                    if platform == "tiktok":
+                        recent = [x for x in win_times if 0 <= t - x < 86400]
+                        if len(recent) >= eff_cap:
+                            t = max(t, min(recent) + 86400 + 120)
+                            moved = True
+                    else:
+                        d = _day(t)
+                        if day_counts.get(d, 0) >= eff_cap:
+                            lt = time.localtime(t + 86400)
+                            t = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 8, 30, 0, 0, 0, -1))
+                            moved = True
+                if not moved and is_short and SHORT_PERIOD_CAP > 0:
+                    pk, nxt_p = _period_info(t)
+                    p_cap = _period_cap(int(pk.rsplit(":", 1)[-1]))
+                    if p_cap > 0 and period_counts.get(pk, 0) >= p_cap:
+                        t = max(t, nxt_p)
+                        moved = True
+                if not moved and not is_short and platform == "youtube" and LONG_DAILY_CAP > 0:
+                    d = _day(t)
+                    if long_day_counts.get(d, 0) >= LONG_DAILY_CAP:
+                        lt = time.localtime(t + 86400)
+                        t = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 12, 0, 0, 0, 0, -1))
+                        moved = True
+                if not moved:
+                    break
+            p["due_at"] = t
+            d = _day(t)
+            day_counts[d] = day_counts.get(d, 0) + 1
+            if is_short:
+                pk = _period_info(t)[0]
+                period_counts[pk] = period_counts.get(pk, 0) + 1
+                t_short = t + eff_gap * 60
+            else:
+                long_day_counts[d] = long_day_counts.get(d, 0) + 1
+                step_gap = max(eff_gap, 240) if platform == "youtube" else eff_gap
+                t_long = t + step_gap * 60
+                if d == _day(t_short):
+                    t_short = max(t_short, t + eff_gap * 60)
+            win_times.append(t)
+            used_slots.append(t)
+        _save()
+    for p in ordered:
+        _mirror(p)
+
+
 def enqueue(job, clip, account_ids, now=False) -> list:
+    if _is_music_blocked_long(clip):
+        return []
     c = creators.get(job["creator"]) or creators.DEFAULTS
     made = []
     prio = clip_priority(clip)
     fmt = clip.get("format", "9:16")
+    is_short = (fmt != "16:9") and (clip.get("clip_kind") != "long") and ((clip.get("end", 0) - clip.get("start", 0)) <= 180)
     with _lock:
         for aid in account_ids:
             acc = accounts.get(aid)
@@ -103,22 +303,30 @@ def enqueue(job, clip, account_ids, now=False) -> list:
                 continue
             if fmt == "16:9" and acc["platform"] != "youtube":
                 continue
+            dur = (clip.get("end") or 0) - (clip.get("start") or 0)
+            if acc["platform"] == "instagram" and dur > 90:
+                continue  # Instagram Reels API rejects >90s (error 2207077)
             if any(p["job"] == job["id"] and p["clip"] == clip["id"] and p["account"] == aid
                    and p["status"] in OPEN + ("posted",) for p in _mine()):
                 continue  # never post the same clip to the same account twice
             eff_gap = platform_gap(acc["platform"], c["post_gap_min"])
-            due = time.time() if now else _next_slot(aid, eff_gap, c["daily_cap"])
+            due = time.time() if now else _next_slot(aid, eff_gap, c["daily_cap"], acc["platform"], is_short=is_short)
             p = {"id": secrets.token_hex(8), "user": ctx.uid(), "job": job["id"], "clip": clip["id"], "creator": job["creator"],
                  "account": aid, "account_name": acc["name"], "platform": acc["platform"], "status": "scheduled",
-                 "due_at": due, "created": time.time(), "title": clip.get("title") or clip.get("hook") or "Clip",
+                 "due_at": due, "created": time.time(), "made_at": clip.get("rendered_at") or clip.get("made_at") or time.time(),
+                 "title": clip.get("title") or clip.get("hook") or "Clip",
                  "score": clip.get("score", 0), "tries": 0, "url": "", "remote_id": "", "error": None, "views": None,
                  "series_id": clip.get("series_id"), "part_index": clip.get("part_index"),
-                 "priority": prio, "format": fmt}
+                 "priority": prio, "format": fmt, "manual_now": bool(now)}
             _posts.append(p)
             made.append(p)
         _save()
     for p in made:
         _mirror(p)
+    if made and not now:
+        c = creators.get(job["creator"]) or creators.DEFAULTS
+        for aid in {p["account"] for p in made}:
+            rebalance_account(aid, gap_min=c["post_gap_min"], cap=c["daily_cap"])
     return made
 
 
@@ -127,7 +335,7 @@ def enqueue_series(job, clips: list[dict], account_ids: list[str]) -> list:
     ordered = sorted(clips, key=lambda k: k.get("part_index") or 0)
     made = []
     for clip in ordered:
-        made.extend(enqueue(job, clip, account_ids))
+        made.extend(enqueue(job, clip, account_ids, now=False))
     return made
 
 
@@ -139,6 +347,9 @@ def on_clip_ready(job, clip):
     if clip.get("clip_kind") == "series":
         return  # series parts are enqueued in strict 1..N order by enqueue_series
     if clip.get("clip_kind") == "long":
+        if _is_music_blocked_long(clip):
+            creators.log(c["id"], f"Vídeo longo bloqueado por música >5s: {clip.get('title') or clip.get('hook')}")
+            return
         if clip.get("score", 0) < c.get("long_min_score", 70):
             return
         yt_accs = [aid for aid in c["accounts"] if (accounts.get(aid) or {}).get("platform") == "youtube"]
@@ -156,8 +367,20 @@ def on_clip_ready(job, clip):
 
 
 def _caption(clip, creator):
-    tags = " ".join("#" + h for h in clip.get("hashtags", []))
-    return "\n\n".join(x for x in (clip.get("description", ""), tags, creator.get("post_footer", "")) if x)
+    desc = (clip.get("description") or "").strip()
+    is_long = clip.get("clip_kind") == "long" or clip.get("format") == "16:9" or (clip.get("end", 0) - clip.get("start", 0)) > 180
+    if desc and "?" not in desc and "comenta" not in desc.lower():
+        cta = "Qual detalhe mais chamou sua atenção? Deixe nos comentários!" if is_long else "O que você achou dessa cena? Comenta aí!"
+        desc = f"{desc}\n{cta}"
+    elif not desc:
+        desc = "Qual detalhe mais chamou sua atenção? Deixe nos comentários!" if is_long else "O que você achou dessa cena? Comenta aí!"
+    raw_tags = list(clip.get("hashtags") or [])
+    for core_tag in ("GTA6", "GTAVI", "GTA6Brasil", "ViceCity"):
+        if any(t.lower() in ("gta6", "gtavi", "vicecity", "gta6game") for t in raw_tags):
+            if core_tag.lower() not in {t.lower() for t in raw_tags}:
+                raw_tags.append(core_tag)
+    tags = " ".join("#" + h for h in raw_tags[:10] if h)
+    return "\n\n".join(x for x in (desc, tags, creator.get("post_footer", "")) if x)
 
 
 def _post(p):
@@ -179,6 +402,8 @@ def _post(p):
         creator = creators.get(job["creator"]) or dict(creators.DEFAULTS, name="clips")
         title, cap = clip.get("title") or clip.get("hook") or "Clip", _caption(clip, creator)
         is_short = (clip.get("clip_kind") != "long") and (clip.get("format") != "16:9") and ((clip.get("end", 0) - clip.get("start", 0)) <= 180)
+        if not is_short and clip.get("has_music"):
+            raise RuntimeError("Vídeo longo bloqueado: contém música (>5s); permitido apenas em Shorts/Reels.")
         if acc["platform"] == "youtube":
             yt_desc = (cap + "\n\n#Shorts") if is_short else cap
             thumb_path = (Path(job["dir"]) / "clips" / Path(str(clip.get("cover") or "")).name) if (not is_short and clip.get("cover")) else None
@@ -193,14 +418,40 @@ def _post(p):
         p.update(status="posted", posted_at=time.time(), remote_id=rid, url=url, error=None)
         creators.log(p["creator"], f"Posted to {acc['name']}: {title}")
     except Exception as e:  # noqa: BLE001
-        p["tries"] += 1
-        p["error"] = str(e)[-300:]
-        if p["tries"] < 3 and clip and acc:
-            p.update(status="scheduled", due_at=time.time() + 600)  # try again in 10 minutes
+        err_msg = str(e)[-300:]
+        p["error"] = err_msg
+        if "spam_risk" in err_msg or "too_many_posts" in err_msg or "rate_limit" in err_msg.lower():
+            # Platform 24h quota hit: push this account's queue out without burning retry tries
+            with _lock:
+                oldest = min((x.get("posted_at") or x["due_at"] for x in _mine()
+                              if x["account"] == p["account"] and x["status"] == "posted"
+                              and time.time() - (x.get("posted_at") or x["due_at"]) < 86400), default=0)
+                wake = max(time.time() + 7200, (oldest + 86400 + 180) if oldest else 0)
+                p.update(status="scheduled", due_at=wake)
+                for other in _mine():
+                    if other["account"] == p["account"] and other["status"] == "scheduled" and other["due_at"] < wake:
+                        other["due_at"] = wake + 60
+        elif "quotaexceeded" in err_msg.lower() or "uploadlimitexceeded" in err_msg.lower():
+            # YouTube Data API / channel daily quota hit: reschedule for next day 05:05 local (PST midnight reset)
+            with _lock:
+                now_t = time.time()
+                lt = time.localtime(now_t)
+                wake = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 5, 5, 0, 0, 0, -1))
+                if wake <= now_t + 300:
+                    lt2 = time.localtime(now_t + 86400)
+                    wake = time.mktime((lt2.tm_year, lt2.tm_mon, lt2.tm_mday, 5, 5, 0, 0, 0, -1))
+                p.update(status="scheduled", due_at=wake)
+                for other in _mine():
+                    if other["account"] == p["account"] and other["status"] == "scheduled" and other["due_at"] < wake:
+                        other["due_at"] = wake + 60
         else:
-            p["status"] = "failed"
-            creators.log(p["creator"], f"Post failed on {p['account_name']}: {p['error']}")
-            alerts.notify(f"post failed on {p['account_name']} ({p['title']}): {p['error'][:200]}", kind="post")
+            p["tries"] += 1
+            if p["tries"] < 3 and clip and acc:
+                p.update(status="scheduled", due_at=time.time() + 600)  # try again in 10 minutes
+            else:
+                p["status"] = "failed"
+                creators.log(p["creator"], f"Post failed on {p['account_name']}: {p['error']}")
+                alerts.notify(f"post failed on {p['account_name']} ({p['title']}): {p['error'][:200]}", kind="post")
     _save()
     _mirror(p)
     if p.get("status") == "posted":
@@ -245,8 +496,28 @@ def _run():
                 if _series_blocked(p):
                     continue
                 with ctx.as_user(p["user"]):
-                    if accounts.settings()["paused"]:
+                    st = accounts.settings()
+                    if st.get("paused") or p.get("platform") in (st.get("paused_platforms") or ()):
                         continue
+                    if not p.get("manual_now"):
+                        c = creators.get(p.get("creator")) or creators.DEFAULTS
+                        eff_gap = platform_gap(p.get("platform", ""), c["post_gap_min"])
+                        mine_acc = [x for x in _mine() if x["account"] == p["account"] and x["status"] in ("posting", "posted")]
+                        last_t = max((x.get("posted_at") or x["due_at"] for x in mine_acc), default=0)
+                        now_t = time.time()
+                        cur_pk = _period_info(now_t)[0]
+                        is_short = _is_short_post(p)
+                        period_hits = sum(
+                            1 for x in mine_acc
+                            if _is_short_post(x) and _period_info(x.get("posted_at") or x["due_at"])[0] == cur_pk
+                        ) if is_short else 0
+                        if (last_t and now_t - last_t < eff_gap * 60 - 5) or (is_short and period_hits >= SHORT_PERIOD_CAP):
+                            nxt = _next_slot(p["account"], eff_gap, c["daily_cap"], p.get("platform", ""), is_short=is_short)
+                            with _lock:
+                                if p["status"] == "scheduled":
+                                    p["due_at"] = max(now_t + 60, nxt)
+                                    _save()
+                            continue
                     with _lock:
                         if p["status"] != "scheduled":
                             continue
@@ -324,10 +595,27 @@ def overview() -> dict:
             "queued": sum(1 for p in ps if p["status"] in OPEN), "failed": sum(1 for p in ps if p["status"] == "failed"),
             "views": views, "earnings": round(views / 1000 * c["rate_per_1k"], 2)})
     names = {c["id"]: c["name"] for c in all_cs}
+    clip_meta = {(j["id"], k["id"]): (j, k) for j in all_js for k in j.get("clips", [])}
     queue = sorted((p for p in _posts if p["status"] in OPEN), key=lambda p: p["due_at"])
     done = sorted((p for p in _posts if p["status"] in ("posted", "failed")), key=lambda p: -(p.get("posted_at") or p["due_at"]))[:15]
-    show = [{**{k: v for k, v in p.items() if k != "user"}, "creator_name": names.get(p["creator"], ""),
-             "priority": p.get("priority", 3), "format": p.get("format", "9:16")} for p in queue + done]
+    show = []
+    for p in queue + done:
+        j_obj, k_obj = clip_meta.get((p.get("job"), p.get("clip")), ({}, {}))
+        made_ts = k_obj.get("rendered_at") or k_obj.get("made_at") or p.get("made_at") or j_obj.get("created") or p.get("created") or 0
+        queued_ts = p.get("created") or made_ts
+        dur = round(max(0.0, float((k_obj.get("end") or 0) - (k_obj.get("start") or 0))), 1)
+        tags_lower = {str(t).lower() for t in (k_obj.get("hashtags") or [])}
+        is_opt = bool((p.get("score") or k_obj.get("score") or 0) >= 82 and ("gta6brasil" in tags_lower or k_obj.get("thumb_text")))
+        show.append({
+            **{k: v for k, v in p.items() if k != "user"},
+            "creator_name": names.get(p["creator"], ""),
+            "priority": p.get("priority", 3),
+            "format": p.get("format", "9:16"),
+            "made_at": made_ts,
+            "queued_at": queued_ts,
+            "duration": dur,
+            "optimized": is_opt,
+        })
     # last 14 days, oldest first, for the home graph
     days = [_day(time.time() - 86400 * i) for i in range(13, -1, -1)]
     made, posted, views = {d: 0 for d in days}, {d: 0 for d in days}, {d: 0 for d in days}
@@ -341,7 +629,9 @@ def overview() -> dict:
             posted[_day(p["posted_at"])] += 1
             views[_day(p["posted_at"])] += p["views"] or 0
     daily = [{"day": d, "clips": made[d], "posted": posted[d], "views": views[d]} for d in days]
-    return {"paused": accounts.settings()["paused"], "creators": rows, "posts": show, "daily": daily,
+    st = accounts.settings()
+    return {"paused": bool(st.get("paused")), "paused_platforms": list(st.get("paused_platforms") or []),
+            "creators": rows, "posts": show, "daily": daily,
             "alerts": alerts.configured(), "recording": len(live.active_mine())}
 
 
@@ -355,6 +645,8 @@ def digest_text() -> str:
         lines.append("No creators set up yet.")
     if o["paused"]:
         lines.append("Posting is paused.")
+    elif o.get("paused_platforms"):
+        lines.append("Paused platforms: " + ", ".join(o["paused_platforms"]))
     return "\n".join(lines)
 
 
