@@ -1709,6 +1709,48 @@ async function openRemoteDlg(mode = "auto") {
     </div>`;
   } catch (e) { dlg.innerHTML = `<div class="dlg"><h2>Acesso Mobile</h2><p class="err">${esc(e.message)}</p><div class="dlg-foot"><button class="btn" type="button" data-act="closeform">Fechar</button></div></div>`; }
 }
+async function openQueueCtrlDlg() {
+  const dlg = $("#formdlg");
+  dlg.innerHTML = `<div class="dlg"><div class="card-head" style="margin:0;flex-wrap:nowrap;align-items:flex-start"><div style="flex:1;min-width:0"><h2>Controle da Fila &amp; Ritmo</h2><p class="sub">Carregando fila de hoje…</p></div><button class="btn sm icon ghost" type="button" data-act="closeform" aria-label="Fechar">${ic("x")}</button></div></div>`;
+  if (!dlg.open) dlg.showModal();
+  try {
+    const q = await api("/api/queue");
+    const cfg = q.queue_cfg || {}, st = q.stats || {};
+    const statLine = (k, lb) => {
+      const s = st[k] || {};
+      const ts = (s.times_today || []).slice(0, 6).join(", ");
+      return `<div class="ob" style="padding:10px 12px"><b>${lb}: ${s.posted_today || 0} feitos · ${s.due_today || 0} previstos hoje</b><div class="sub" style="margin-top:2px">${s.queued_total || 0} na fila total${ts ? ` · Próximos hoje: ${esc(ts)}` : ""}</div></div>`;
+    };
+    dlg.innerHTML = `<div class="dlg" style="width:560px;max-width:100%"><div class="card-head" style="margin:0;flex-wrap:nowrap;align-items:flex-start"><div style="flex:1;min-width:0"><h2>Controle Unificado da Fila</h2><p class="sub">Ajuste metas diárias de curtos (Shorts, Reels e TikTok), YouTube longos ou antecipe envios ainda hoje.</p></div><button class="btn sm icon ghost" type="button" data-act="closeform" aria-label="Fechar">${ic("x")}</button></div>
+      <div class="og" style="grid-template-columns:repeat(2,minmax(0,1fr))">${statLine("yt_shorts", "YT Shorts")}${statLine("ig_reels", "IG Reels")}${statLine("tiktok", "TikTok")}${statLine("yt_long", "YT Longos")}</div>
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        <button class="btn sm" type="button" data-act="qpreset" data-m="normal">Padrão (7 curtos · 2 longos)</button>
+        <button class="btn sm primary" type="button" data-act="qpreset" data-m="weekend">${ic("bolt")}Fim de Semana (10 curtos · 4 longos)</button>
+        <button class="btn sm" type="button" data-act="qpreset" data-m="turbo">Turbo (14 curtos · 6 longos)</button>
+      </div>
+      <div class="fields" id="qcfgform" style="gap:12px">
+        <label class="f">Curtos/dia unificado (Shorts, Reels, TikTok)<input type="number" min="0" max="100" data-qc="short_daily_cap" value="${esc(cfg.short_daily_cap ?? 0)}"><small class="sub">0 = padrão por janela de 6h</small></label>
+        <label class="f">Máx. curtos por período (6h)<input type="number" min="0" max="24" data-qc="short_period_cap" value="${esc(cfg.short_period_cap ?? 2)}"></label>
+        <label class="f">Intervalo entre curtos (min)<input type="number" min="0" max="720" data-qc="short_gap_min" value="${esc(cfg.short_gap_min ?? 0)}"><small class="sub">0 = padrão da plataforma</small></label>
+        <label class="f">Vídeos longos/dia (YouTube 16:9)<input type="number" min="0" max="30" data-qc="long_daily_cap" value="${esc(cfg.long_daily_cap ?? 2)}"></label>
+        <label class="f">Intervalo entre longos (min)<input type="number" min="30" max="1440" data-qc="long_gap_min" value="${esc(cfg.long_gap_min ?? 240)}"></label>
+        <div style="display:flex;align-items:flex-end"><button class="btn primary" style="width:100%" type="button" data-act="qsave">${ic("check")}Salvar ritmo e recalcular</button></div>
+      </div>
+      <div class="ob" style="padding:14px">
+        <div class="ot" style="margin-bottom:8px">Adicionar reforço distribuído ainda hoje (até 23:50)</div>
+        <div class="fields" id="qboostform" style="gap:10px;grid-template-columns:repeat(3,minmax(0,1fr))">
+          <label class="f">+ Shorts YT<input type="number" min="0" max="30" data-qb="shorts" value="4"></label>
+          <label class="f">+ Longos YT<input type="number" min="0" max="20" data-qb="longs" value="2"></label>
+          <label class="f">+ TikTok<input type="number" min="0" max="30" data-qb="tiktoks" value="0"></label>
+        </div>
+        <div class="row" style="margin-top:10px;justify-content:space-between;flex-wrap:wrap">
+          <label class="ck"><input type="checkbox" id="q_sync_reels" checked>Reels acompanham os Shorts nos mesmos horários</label>
+          <button class="btn sm primary" type="button" data-act="qboost">${ic("send")}Distribuir na fila de hoje</button>
+        </div>
+      </div>
+    </div>`;
+  } catch (e) { dlg.innerHTML = `<div class="dlg"><h2>Controle da Fila</h2><p class="err">${esc(e.message)}</p><div class="dlg-foot"><button class="btn" type="button" data-act="closeform">Fechar</button></div></div>`; }
+}
 function openAcct() {
   const p = $("#acctpop");
   if (!p.hidden) return closePops();
@@ -2611,6 +2653,7 @@ function drawPlatformView(plat) {
           <p class="sub">${accs.length ? accs.map(a => `${esc(a.name)}${a.detail ? " (" + esc(a.detail) + ")" : ""}`).join(" · ") : `Nenhuma conta ${esc(label)} conectada ainda.`}</p>
         </div>
         <div class="row" style="gap:8px;flex-wrap:wrap">
+          <button class="btn sm primary" type="button" data-act="qctrl" data-p="${esc(plat)}">${ic("sliders")}Controlar fila</button>
           <button class="btn sm ${isPaused ? "plat-paused" : ""}" data-act="pauseplat" data-p="${esc(plat)}">${ic(isPaused ? "play" : "pause")}${isPaused ? `Retomar ${esc(label)}` : `Pausar só ${esc(label)}`}</button>
           <button class="btn sm" data-act="go" data-v="settings" data-tab="covers">${ic("image")}Capa Padrão</button>
           <button class="btn sm" data-act="go" data-v="settings" data-tab="apps">${ic("plug")}Contas conectadas</button>
@@ -2628,7 +2671,7 @@ function drawPlatformView(plat) {
       <div class="card-head"><div><h2>Configurações exclusivas — ${esc(label)}</h2><p class="sub">Intervalo, limites, privacidade, CTA e hashtags aplicados especificamente no ${esc(label)}.</p></div>
         <button class="btn primary sm" type="button" data-act="platcfgsave" data-p="${esc(plat)}">${ic("check")}Salvar ${esc(label)}</button></div>
       <div class="fields">
-        <label class="f">Intervalo mínimo entre posts (min)<input type="number" min="5" max="1440" data-pk="gap_min" value="${esc(pref.gap_min ?? (plat === "tiktok" ? 120 : 90))}"></label>
+        <label class="f">Intervalo mínimo entre posts (min)<input type="number" min="10" max="1440" data-pk="gap_min" value="${esc(pref.gap_min ?? (plat === "tiktok" ? 120 : 90))}"></label>
         <label class="f">Máximo de posts por dia<input type="number" min="0" max="500" data-pk="daily_cap" value="${esc(pref.daily_cap ?? 12)}"></label>
         <label class="f">Nota mínima para auto-postar (0–100)<input type="number" min="0" max="100" data-pk="min_score" value="${esc(pref.min_score ?? 80)}"></label>
         <label class="f">Privacidade padrão<select data-pk="privacy">${opts({public:"Público", unlisted:"Não listado", private:"Privado"}, pref.privacy || "public")}</select></label>
@@ -2782,11 +2825,22 @@ function drawOverview() {
     return `<button class="btn sm ${isP ? "plat-paused" : ""}" data-act="pauseplat" data-p="${pl}" title="${isP ? `Retomar postagens no ${PLAT_LABEL[pl]}` : `Pausar postagens no ${PLAT_LABEL[pl]}`}">${ic(isP ? "play" : "pause")}${PLAT_LABEL[pl]}${isP ? " (pausado)" : ""}</button>`;
   }).join("");
 
+  const qs = o.queue_stats || {};
+  const qTodayChips = [
+    ["yt_shorts", "YT Shorts"],
+    ["yt_long", "YT Longos"],
+    ["ig_reels", "IG Reels"],
+    ["tiktok", "TikTok"],
+  ].map(([k, lb]) => {
+    const s = qs[k];
+    if (!s) return "";
+    return `<span class="plat-chip"><b>${lb}:</b> ${s.posted_today} feitos + <b>${s.due_today}</b> hoje</span>`;
+  }).filter(Boolean).join("");
   const queueSub = o.paused
     ? "Pausada no geral. Gravações e clipes continuam; nada será postado."
     : pausedPlats.length
       ? `Postagens ativas — pausada em: ${pausedPlats.map(x => PLAT_LABEL[x] || x).join(", ")}.`
-      : "Clipes na fila saem no horário agendado (máx. 3 Shorts/Reels por período).";
+      : `Clipes saem conforme o ritmo da fila (${o.queue_cfg?.short_daily_cap ? o.queue_cfg.short_daily_cap + " curtos/dia" : (o.queue_cfg?.short_period_cap ?? 2) + "/período"} · ${o.queue_cfg?.long_daily_cap ?? 2} longos/dia).`;
 
   put(box, `<div class="tiles">
       <div class="tile"><i>${ic("radio")}</i><b>${o.recording}</b><span>Gravando agora</span></div>
@@ -2807,8 +2861,9 @@ function drawOverview() {
       ${o.creators.length ? `<div class="scroll"><table><tr><th>Criador</th><th>Status</th><th>Postagem auto.</th><th class="num">Clipes hoje</th><th class="num">Postados hoje</th><th class="num">Na fila</th><th class="num">Falhas</th><th class="num">Views</th><th class="num">Est. $</th></tr>
       ${o.creators.map(r => `<tr><td><a class="lnk" href="#" data-act="go" data-v="c:${esc(r.id)}">${esc(r.name)}</a></td><td>${state(r)}</td><td>${r.autopost ? `<span class="pill ok">Ligada</span>` : `<span class="pill">Desligada</span>`}</td><td class="num">${r.clips_today} <span class="sub">/ ${r.clips_total}</span></td><td class="num">${r.posted_today} <span class="sub">/ ${r.posted_total}</span></td><td class="num">${r.queued}</td><td class="num">${r.failed}</td><td class="num">${r.views.toLocaleString()}</td><td class="num">${r.earnings.toFixed(2)}</td></tr>`).join("")}</table></div>`
       : `<div class="empty"><img src="/brand/favicon.svg?v=vc4" alt=""><b>Nenhum criador ainda</b>Adicione um criador para organizar seus canais e clipes.</div>`}</div>
-    <div class="card"><div class="card-head"><div><h2>Fila de postagem</h2><p class="sub">${queueSub}</p></div>
+    <div class="card"><div class="card-head"><div><h2>Fila de postagem</h2><p class="sub">${queueSub}</p>${qTodayChips ? `<div class="plat-chips" style="margin-top:8px">${qTodayChips}</div>` : ""}</div>
         <div class="ov-acts">
+          <button class="btn sm primary" type="button" data-act="qctrl">${ic("sliders")}Controlar fila / Acelerar</button>
           ${platBtns}
           <button class="btn sm ${f.group ? "primary" : ""}" data-act="ovgroup" title="Alternar entre fila cronológica e agrupada por clipe">${f.group ? "Visão: Por clipe" : "Visão: Cronológica"}</button>
           <button class="btn ${o.paused ? "primary" : ""}" data-act="pause">${ic(o.paused ? "play" : "pause")}${o.paused ? "Retomar tudo" : "Pausar tudo"}</button>
@@ -3863,6 +3918,30 @@ document.addEventListener("click", async e => {
     if (a === "ovgroup") { S.ov.group = !S.ov.group; S.ov.limit = 60; return drawOverview(); }
     if (a === "ovclear") { S.ov = {...S.ov, creator:"", platform:"", status:"", format:"", limit:60}; return drawOverview(); }
     if (a === "ovmore") { S.ov.limit = (S.ov.limit || 60) + 60; return drawOverview(); }
+    if (a === "qctrl") return openQueueCtrlDlg();
+    if (a === "qpreset") {
+      await send("/api/queue/config", {preset: d.m || "weekend"}, "PUT");
+      toast(`Ritmo ${d.m === "turbo" ? "Turbo" : d.m === "normal" ? "Padrão" : "Fim de Semana"} aplicado e fila recalculada!`, "ok");
+      await loadOverview();
+      return openQueueCtrlDlg();
+    }
+    if (a === "qsave") {
+      const patch = {};
+      $$("#qcfgform [data-qc]").forEach(i => { patch[i.dataset.qc] = Number(i.value || 0); });
+      if (patch.short_gap_min >= 10 || patch.short_daily_cap > 0 || patch.short_period_cap !== 2 || patch.long_daily_cap !== 2) patch.strict_floor = false;
+      await send("/api/queue/config", patch, "PUT");
+      toast("Ritmo da fila atualizado e agendamentos recalculados!", "ok");
+      await loadOverview();
+      return openQueueCtrlDlg();
+    }
+    if (a === "qboost") {
+      const payload = {sync_reels: !!$("#q_sync_reels")?.checked};
+      $$("#qboostform [data-qb]").forEach(i => { payload[i.dataset.qb] = Number(i.value || 0); });
+      const res = await send("/api/queue/boost", payload, "POST");
+      toast(`Distribuídos ${res?.boost?.boosted_total || 0} envios na fila de hoje!`, "ok");
+      await loadOverview();
+      return openQueueCtrlDlg();
+    }
     if (a === "pcancel" || a === "pretry") { await api(`/api/posts/${d.id}/${a === "pcancel" ? "cancel" : "retry"}`, {method:"POST"}); return loadOverview(); }
     if (a === "copycap") {
       const p = (S.overview?.posts || []).find(x => x.id === d.id);

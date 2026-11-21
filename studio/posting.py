@@ -93,6 +93,35 @@ def _period_info(t: float) -> tuple[str, float]:
     return f"{day}:{p_idx}", nxt
 
 
+def _qcfg() -> dict:
+    if ctx.uid_or_none() is None:
+        return dict(accounts.QUEUE_DEFAULTS)
+    return accounts.queue_cfg()
+
+
+def _dyn_long_cap() -> int:
+    return max(0, int(_qcfg().get("long_daily_cap", LONG_DAILY_CAP)))
+
+
+def _dyn_long_gap() -> int:
+    return max(30, int(_qcfg().get("long_gap_min", 240)))
+
+
+def _dyn_period_cap(p_idx: int) -> int:
+    q = _qcfg()
+    d_cap = int(q.get("short_daily_cap") or 0)
+    p_cap = int(q.get("short_period_cap") if q.get("short_period_cap") is not None else SHORT_PERIOD_CAP)
+    if d_cap > 0:
+        if p_idx == 0:
+            return max(1, (d_cap + 4) // 5)
+        return max(p_cap if p_cap > 0 else 1, (d_cap + 2) // 3)
+    if p_cap == 0:
+        return 0
+    if p_cap != SHORT_PERIOD_CAP:
+        return p_cap
+    return _period_cap(p_idx)
+
+
 def _is_short_post(p: dict) -> bool:
     if p.get("format") == "16:9" or p.get("priority") == 1:
         return False
@@ -105,14 +134,17 @@ def _is_music_blocked_long(clip: dict) -> bool:
 
 
 def _next_slot(account_id, gap_min, cap, platform="", is_short=True):
-    """Earliest time respecting account gap, daily/24h cap, and 3 Shorts/Reels per 6h period."""
+    """Earliest time respecting account gap, daily/24h cap, and configurable per-period limits."""
     mine = [p for p in _mine() if p["account"] == account_id and p["status"] in OPEN + ("posted",)]
-    eff_gap = max(gap_min, PLATFORM_GAPS.get(platform, 0))
+    qcfg = _qcfg()
+    plat_floor = 0 if not qcfg.get("strict_floor", True) else PLATFORM_GAPS.get(platform, 0)
+    eff_gap = max(10 if is_short else 30, int(gap_min), plat_floor)
     t = max(time.time(), max((p.get("posted_at") or p["due_at"] for p in mine), default=0) + eff_gap * 60)
     plat_cap = PLATFORM_CAPS.get(platform, 0)
     eff_cap = min(cap, plat_cap) if (cap and cap > 0 and plat_cap) else (plat_cap or cap)
     short_mine = [p for p in mine if _is_short_post(p)] if is_short else []
-    for _ in range(48):
+    long_cap = _dyn_long_cap()
+    for _ in range(96):
         moved = False
         if eff_cap and eff_cap > 0:
             if platform == "tiktok":
@@ -125,15 +157,15 @@ def _next_slot(account_id, gap_min, cap, platform="", is_short=True):
                     lt = time.localtime(t + 86400)
                     t = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 6, 0, 0, 0, 0, -1))
                     moved = True
-        if not moved and is_short and SHORT_PERIOD_CAP > 0:
+        if not moved and is_short:
             pk, nxt_p = _period_info(t)
-            p_cap = _period_cap(int(pk.rsplit(":", 1)[-1]))
+            p_cap = _dyn_period_cap(int(pk.rsplit(":", 1)[-1]))
             if p_cap > 0 and sum(1 for p in short_mine if _period_info(p.get("posted_at") or p["due_at"])[0] == pk) >= p_cap:
                 t = max(t, nxt_p)
                 moved = True
-        if not moved and not is_short and platform == "youtube" and LONG_DAILY_CAP > 0:
+        if not moved and not is_short and platform == "youtube" and long_cap > 0:
             long_mine = [p for p in mine if not _is_short_post(p)]
-            if sum(1 for p in long_mine if _day(p.get("posted_at") or p["due_at"]) == _day(t)) >= LONG_DAILY_CAP:
+            if sum(1 for p in long_mine if _day(p.get("posted_at") or p["due_at"]) == _day(t)) >= long_cap:
                 lt = time.localtime(t + 86400)
                 t = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 12, 0, 0, 0, 0, -1))
                 moved = True
@@ -144,6 +176,9 @@ def _next_slot(account_id, gap_min, cap, platform="", is_short=True):
 
 def platform_gap(platform: str, gap_min: int) -> int:
     """Minimum safe gap in minutes between posts on a given platform."""
+    qcfg = _qcfg()
+    if not qcfg.get("strict_floor", True):
+        return max(10 if platform != "tiktok" else 20, int(gap_min))
     if platform == "tiktok":
         return max(120, int(gap_min))
     if platform in ("instagram", "youtube"):
@@ -191,30 +226,45 @@ def _interleave_by_creator(items: list[dict]) -> list[dict]:
 
 
 def rebalance_account(account_id: str, gap_min: int = 90, cap: int = 12):
-    """Re-slot scheduled posts: interleave up to LONG_DAILY_CAP (2) Long videos/day with Shorts/Reels (7/day across periods)."""
+    """Re-slot scheduled posts while honoring pinned boost_day slots and unified short/long pacing."""
     with _lock:
         mine = _mine()
         sched = [p for p in mine if p["account"] == account_id and p["status"] == "scheduled"]
         if len(sched) <= 1:
             return
+        today_str = _day(time.time())
+        pinned = [p for p in sched if p.get("boost_day") == today_str]
+        pinned_ids = {p["id"] for p in pinned}
+        unpinned = [p for p in sched if p["id"] not in pinned_ids]
+        for p in unpinned:
+            if p.get("boost_day") and p.get("boost_day") != today_str:
+                p.pop("boost_day", None)
         posted = [p for p in mine if p["account"] == account_id and p["status"] in ("posting", "posted")]
         platform = (accounts.get(account_id) or {}).get("platform") or (sched[0].get("platform") or "")
-        eff_gap = max(gap_min, PLATFORM_GAPS.get(platform, 0))
+        qcfg = _qcfg()
+        plat_floor = 0 if not qcfg.get("strict_floor", True) else PLATFORM_GAPS.get(platform, 0)
+        eff_gap = max(10, int(gap_min), plat_floor)
+        short_gap_cfg = int(qcfg.get("short_gap_min") or 0)
+        eff_short_gap = max(10 if platform != "tiktok" else 20, short_gap_cfg) if short_gap_cfg >= 10 else eff_gap
         plat_cap = PLATFORM_CAPS.get(platform, 0)
         eff_cap = min(cap, plat_cap) if (cap and cap > 0 and plat_cap) else (plat_cap or cap)
-        longs = _interleave_by_creator([p for p in sched if _is_long_post(p)])
-        shorts = _interleave_by_creator([p for p in sched if not _is_long_post(p)])
+        long_cap = _dyn_long_cap()
+        long_gap = _dyn_long_gap()
+        longs = _interleave_by_creator([p for p in unpinned if _is_long_post(p)])
+        shorts = _interleave_by_creator([p for p in unpinned if not _is_long_post(p)])
         ordered = []
         li, si = 0, 0
-        long_batch = max(1, LONG_DAILY_CAP)
-        short_batch = max(1, sum(_PERIOD_SHORT_CAPS))
+        long_batch = max(1, long_cap or 1)
+        d_short_cap = int(qcfg.get("short_daily_cap") or 0)
+        short_batch = max(1, d_short_cap or sum(_PERIOD_SHORT_CAPS))
         while li < len(longs) or si < len(shorts):
             ordered.extend(longs[li:li + long_batch])
             li += long_batch
             ordered.extend(shorts[si:si + short_batch])
             si += short_batch
-        last_t = max((p.get("posted_at") or p["due_at"] for p in posted), default=0)
-        base_t = max(time.time(), last_t + eff_gap * 60) if last_t else time.time()
+        anchors = posted + pinned
+        last_t = max((p.get("posted_at") or p["due_at"] for p in anchors), default=0)
+        base_t = max(time.time(), last_t + eff_short_gap * 60) if last_t else time.time()
         t_short = base_t
         t_long = base_t
         day_counts: dict[str, int] = {}
@@ -222,7 +272,7 @@ def rebalance_account(account_id: str, gap_min: int = 90, cap: int = 12):
         period_counts: dict[str, int] = {}
         win_times: list[float] = []
         used_slots: list[float] = []
-        for p in posted:
+        for p in anchors:
             pt = p.get("posted_at") or p["due_at"]
             d = _day(pt)
             day_counts[d] = day_counts.get(d, 0) + 1
@@ -235,12 +285,13 @@ def rebalance_account(account_id: str, gap_min: int = 90, cap: int = 12):
             used_slots.append(pt)
         for p in ordered:
             is_short = _is_short_post(p)
+            slot_gap = eff_short_gap if is_short else eff_gap
             t = t_short if is_short else t_long
-            for _ in range(90):
+            for _ in range(120):
                 moved = False
                 for u in sorted(used_slots):
-                    if abs(t - u) < eff_gap * 60:
-                        t = u + eff_gap * 60
+                    if abs(t - u) < slot_gap * 60:
+                        t = u + slot_gap * 60
                         moved = True
                 if eff_cap and eff_cap > 0:
                     if platform == "tiktok":
@@ -254,15 +305,15 @@ def rebalance_account(account_id: str, gap_min: int = 90, cap: int = 12):
                             lt = time.localtime(t + 86400)
                             t = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 8, 30, 0, 0, 0, -1))
                             moved = True
-                if not moved and is_short and SHORT_PERIOD_CAP > 0:
+                if not moved and is_short:
                     pk, nxt_p = _period_info(t)
-                    p_cap = _period_cap(int(pk.rsplit(":", 1)[-1]))
+                    p_cap = _dyn_period_cap(int(pk.rsplit(":", 1)[-1]))
                     if p_cap > 0 and period_counts.get(pk, 0) >= p_cap:
                         t = max(t, nxt_p)
                         moved = True
-                if not moved and not is_short and platform == "youtube" and LONG_DAILY_CAP > 0:
+                if not moved and not is_short and platform == "youtube" and long_cap > 0:
                     d = _day(t)
-                    if long_day_counts.get(d, 0) >= LONG_DAILY_CAP:
+                    if long_day_counts.get(d, 0) >= long_cap:
                         lt = time.localtime(t + 86400)
                         t = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 12, 0, 0, 0, 0, -1))
                         moved = True
@@ -274,13 +325,19 @@ def rebalance_account(account_id: str, gap_min: int = 90, cap: int = 12):
             if is_short:
                 pk = _period_info(t)[0]
                 period_counts[pk] = period_counts.get(pk, 0) + 1
-                t_short = t + eff_gap * 60
+                t_short = t + eff_short_gap * 60
             else:
                 long_day_counts[d] = long_day_counts.get(d, 0) + 1
-                step_gap = max(eff_gap, 240) if platform == "youtube" else eff_gap
-                t_long = t + step_gap * 60
+                step_sec = (max(slot_gap, long_gap) if platform == "youtube" else slot_gap) * 60
+                if platform == "youtube" and (long_cap <= 0 or long_day_counts[d] < long_cap):
+                    lt_d = time.localtime(t)
+                    eod_d = time.mktime((lt_d.tm_year, lt_d.tm_mon, lt_d.tm_mday, 23, 15, 0, 0, 0, -1))
+                    rem_slots = max(1, (long_cap - long_day_counts[d] + 1) if long_cap > 0 else 2)
+                    if t + step_sec > eod_d and eod_d - t >= slot_gap * 60:
+                        step_sec = max(slot_gap * 60, (eod_d - t) / rem_slots)
+                t_long = t + step_sec
                 if d == _day(t_short):
-                    t_short = max(t_short, t + eff_gap * 60)
+                    t_short = max(t_short, t + eff_short_gap * 60)
             win_times.append(t)
             used_slots.append(t)
         _save()
@@ -297,6 +354,157 @@ def rebalance_platform(platform: str):
     base_cap = 12
     for acc in accs:
         rebalance_account(acc["id"], gap_min=_eff_gap(platform, base_gap), cap=_eff_cap(platform, base_cap))
+
+
+def rebalance_all():
+    """Reschedule every connected platform queue using unified and per-platform settings."""
+    for plat in accounts.PLATFORM_NAMES:
+        rebalance_platform(plat)
+
+
+def _distribute_slots(start_t: float, end_t: float, n: int) -> list[float]:
+    if n <= 0:
+        return []
+    span = max(300.0, end_t - start_t)
+    if n == 1:
+        return [start_t + min(1200.0, span * 0.15)]
+    step = span / n
+    return [round(start_t + step * i, 1) for i in range(n)]
+
+
+def boost_today(longs: int = 0, shorts: int = 0, reels: int = 0, tiktoks: int = 0, sync_reels: bool = True) -> dict:
+    """Pull and evenly distribute +N extra posts into remaining hours of today, syncing Reels with Shorts when requested."""
+    now = time.time()
+    lt = time.localtime(now)
+    today_str = _day(now)
+    eod = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 23, 50, 0, 0, 0, -1))
+    if eod <= now + 300:
+        raise ValueError("Muito perto da meia-noite para distribuir novos envios hoje.")
+    start_t = now + 180.0
+    changed: list[dict] = []
+    short_targets: list[tuple[dict, float]] = []
+
+    with _lock:
+        mine = _mine()
+
+        def _redistribute(plat: str, want_extra: int, is_short: bool, offset_sec: float = 0.0) -> list[tuple[dict, float]]:
+            if want_extra <= 0:
+                return []
+            cand = [
+                p for p in mine
+                if p.get("platform") == plat and p.get("status") == "scheduled"
+                and (_is_short_post(p) if is_short else not _is_short_post(p))
+            ]
+            if not cand:
+                return []
+            existing_today = sorted(
+                [p for p in cand if _day(p.get("due_at") or 0) == today_str],
+                key=lambda x: x.get("due_at") or 0,
+            )
+            future = _interleave_by_creator([p for p in cand if _day(p.get("due_at") or 0) != today_str])
+            picked = existing_today + future[:want_extra]
+            slots = _distribute_slots(start_t + offset_sec, eod, len(picked))
+            res = []
+            for p, ts in zip(picked, slots):
+                p["due_at"] = ts
+                p["boost_day"] = today_str
+                changed.append(p)
+                res.append((p, ts))
+            return res
+
+        long_res = _redistribute("youtube", int(longs or 0), is_short=False, offset_sec=300.0)
+        short_res = _redistribute("youtube", int(shorts or 0), is_short=True, offset_sec=0.0)
+        short_targets = short_res
+
+        ig_want = int(reels if reels > 0 else (shorts if (sync_reels and shorts > 0) else 0))
+        if ig_want > 0:
+            ig_cand = [p for p in mine if p.get("platform") == "instagram" and p.get("status") == "scheduled"]
+            ig_existing = sorted(
+                [p for p in ig_cand if _day(p.get("due_at") or 0) == today_str],
+                key=lambda x: x.get("due_at") or 0,
+            )
+            ig_future = _interleave_by_creator([p for p in ig_cand if _day(p.get("due_at") or 0) != today_str])
+            if sync_reels and short_targets:
+                target_n = len(ig_existing) + ig_want
+                # Prefer matching the exact (job, clip) of today's boosted Shorts first
+                clip_to_ts = {(p.get("job"), p.get("clip")): ts for p, ts in short_targets}
+                by_key = {(p.get("job"), p.get("clip")): p for p in ig_cand}
+                chosen: list[dict] = list(ig_existing)
+                chosen_ids = {p["id"] for p in chosen}
+                for key in clip_to_ts:
+                    m = by_key.get(key)
+                    if m and m["id"] not in chosen_ids and len(chosen) < target_n:
+                        chosen.append(m)
+                        chosen_ids.add(m["id"])
+                for p in ig_future:
+                    if p["id"] not in chosen_ids and len(chosen) < target_n:
+                        chosen.append(p)
+                        chosen_ids.add(p["id"])
+                ig_slots = [ts for _, ts in short_targets]
+                if len(ig_slots) != len(chosen):
+                    ig_slots = _distribute_slots(start_t + 120.0, eod, len(chosen))
+                for p, ts in zip(chosen, ig_slots):
+                    p["due_at"] = ts
+                    p["boost_day"] = today_str
+                    changed.append(p)
+            else:
+                _redistribute("instagram", ig_want, is_short=True, offset_sec=120.0)
+
+        tt_res = _redistribute("tiktok", int(tiktoks or 0), is_short=True, offset_sec=180.0) if int(tiktoks or 0) > 0 else []
+        _save()
+
+    for p in changed:
+        _mirror(p)
+    ctx.bump()
+    return {
+        "today": today_str,
+        "boosted_total": len(changed),
+        "longs_today_scheduled": len(long_res),
+        "shorts_today_scheduled": len(short_res),
+        "reels_synced": bool(sync_reels and ig_want > 0),
+        "tiktok_today_scheduled": len(tt_res),
+    }
+
+
+def queue_summary() -> dict:
+    """Return today's posted/scheduled counts per format + queue pacing settings."""
+    now = time.time()
+    lt = time.localtime(now)
+    day = _day(now)
+    eod = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 23, 59, 59, 0, 0, -1))
+    mine = _mine()
+    posted_today = [p for p in mine if p.get("status") == "posted" and _day(p.get("posted_at") or p.get("due_at") or 0) == day]
+    open_q = [p for p in mine if p.get("status") in OPEN]
+    due_today = [p for p in open_q if (p.get("due_at") or 0) <= eod]
+
+    def _bucket(rows, plat, is_short):
+        out = [p for p in rows if p.get("platform") == plat and (_is_short_post(p) if is_short else not _is_short_post(p))]
+        return sorted(out, key=lambda x: x.get("due_at") or 0)
+
+    buckets = {
+        "yt_shorts": ("youtube", True),
+        "yt_long": ("youtube", False),
+        "ig_reels": ("instagram", True),
+        "tiktok": ("tiktok", True),
+    }
+    stats = {}
+    for k, (pl, sh) in buckets.items():
+        pt = _bucket(posted_today, pl, sh)
+        dt = _bucket(due_today, pl, sh)
+        tq = _bucket(open_q, pl, sh)
+        stats[k] = {
+            "posted_today": len(pt),
+            "due_today": len(dt),
+            "total_today": len(pt) + len(dt),
+            "queued_total": len(tq),
+            "times_today": [time.strftime("%H:%M", time.localtime(p.get("due_at") or now)) for p in dt[:16]],
+        }
+    return {
+        "day": day,
+        "queue_cfg": accounts.queue_cfg(),
+        "platform_prefs": accounts.platform_prefs(),
+        "stats": stats,
+    }
 
 
 def enqueue(job, clip, account_ids, now=False) -> list:
@@ -320,8 +528,8 @@ def enqueue(job, clip, account_ids, now=False) -> list:
             if any(p["job"] == job["id"] and p["clip"] == clip["id"] and p["account"] == aid
                    and p["status"] in OPEN + ("posted",) for p in _mine()):
                 continue  # never post the same clip to the same account twice
-            eff_gap = _eff_gap(acc["platform"], c["post_gap_min"])
-            eff_cap = _eff_cap(acc["platform"], c["daily_cap"])
+            eff_gap = _eff_gap(acc["platform"], c["post_gap_min"], is_short=is_short)
+            eff_cap = _eff_cap(acc["platform"], c["daily_cap"], is_short=is_short)
             due = time.time() if now else _next_slot(aid, eff_gap, eff_cap, acc["platform"], is_short=is_short)
             p = {"id": secrets.token_hex(8), "user": ctx.uid(), "job": job["id"], "clip": clip["id"], "creator": job["creator"],
                  "account": aid, "account_name": acc["name"], "platform": acc["platform"], "status": "scheduled",
@@ -391,15 +599,24 @@ def _plat_merged(platform: str) -> dict:
     return {**base, **_plat_override(platform)}
 
 
-def _eff_gap(platform: str, creator_gap: int) -> int:
+def _eff_gap(platform: str, creator_gap: int, is_short: bool = True) -> int:
+    qcfg = _qcfg()
+    if is_short and int(qcfg.get("short_gap_min") or 0) >= 10:
+        return max(10 if platform != "tiktok" else 20, int(qcfg["short_gap_min"]))
     ov = _plat_override(platform)
     g = ov["gap_min"] if "gap_min" in ov and ov["gap_min"] is not None else creator_gap
     return platform_gap(platform, g)
 
 
-def _eff_cap(platform: str, creator_cap: int) -> int:
+def _eff_cap(platform: str, creator_cap: int, is_short: bool = True) -> int:
+    qcfg = _qcfg()
     ov = _plat_override(platform)
-    return int(ov["daily_cap"]) if "daily_cap" in ov and ov["daily_cap"] is not None else creator_cap
+    base = int(ov["daily_cap"]) if "daily_cap" in ov and ov["daily_cap"] is not None else int(creator_cap)
+    if is_short and int(qcfg.get("short_daily_cap") or 0) > 0:
+        want = int(qcfg["short_daily_cap"])
+        plat_cap = PLATFORM_CAPS.get(platform, 0)
+        return min(want, plat_cap) if plat_cap else want
+    return base
 
 
 def _eff_min_score(platform: str, creator: dict, is_long: bool = False) -> int:
@@ -581,23 +798,34 @@ def _run():
                     if not p.get("manual_now"):
                         c = creators.get(p.get("creator")) or creators.DEFAULTS
                         plat_k = p.get("platform", "")
-                        eff_gap = _eff_gap(plat_k, c["post_gap_min"])
-                        eff_cap = _eff_cap(plat_k, c["daily_cap"])
+                        is_short = _is_short_post(p)
+                        eff_gap = _eff_gap(plat_k, c["post_gap_min"], is_short=is_short)
+                        eff_cap = _eff_cap(plat_k, c["daily_cap"], is_short=is_short)
                         mine_acc = [x for x in _mine() if x["account"] == p["account"] and x["status"] in ("posting", "posted")]
                         last_t = max((x.get("posted_at") or x["due_at"] for x in mine_acc), default=0)
                         now_t = time.time()
+                        is_boosted = p.get("boost_day") == _day(now_t)
                         cur_pk = _period_info(now_t)[0]
-                        is_short = _is_short_post(p)
+                        p_cap = _dyn_period_cap(int(cur_pk.rsplit(":", 1)[-1]))
                         period_hits = sum(
                             1 for x in mine_acc
                             if _is_short_post(x) and _period_info(x.get("posted_at") or x["due_at"])[0] == cur_pk
                         ) if is_short else 0
-                        if (last_t and now_t - last_t < eff_gap * 60 - 5) or (is_short and period_hits >= SHORT_PERIOD_CAP):
-                            nxt = _next_slot(p["account"], eff_gap, eff_cap, plat_k, is_short=is_short)
-                            with _lock:
-                                if p["status"] == "scheduled":
-                                    p["due_at"] = max(now_t + 60, nxt)
-                                    _save()
+                        min_safe_gap = min(eff_gap, 25) if is_boosted else eff_gap
+                        hit_gap = bool(last_t and now_t - last_t < min_safe_gap * 60 - 5)
+                        hit_period = bool(not is_boosted and is_short and p_cap > 0 and period_hits >= p_cap)
+                        if hit_gap or hit_period:
+                            if is_boosted:
+                                with _lock:
+                                    if p["status"] == "scheduled":
+                                        p["due_at"] = max(now_t + 60, last_t + min_safe_gap * 60)
+                                        _save()
+                            else:
+                                nxt = _next_slot(p["account"], eff_gap, eff_cap, plat_k, is_short=is_short)
+                                with _lock:
+                                    if p["status"] == "scheduled":
+                                        p["due_at"] = max(now_t + 60, nxt)
+                                        _save()
                             continue
                     with _lock:
                         if p["status"] != "scheduled":
@@ -752,8 +980,11 @@ def overview() -> dict:
             views[_day(pt)] += p.get("views") or 0
     daily = [{"day": d, "clips": made[d], "posted": posted[d], "views": views[d]} for d in days]
     st = accounts.settings()
+    qs = queue_summary()
     return {"paused": bool(st.get("paused")), "paused_platforms": list(st.get("paused_platforms") or []),
             "platform_prefs": accounts.platform_prefs(st),
+            "queue_cfg": qs["queue_cfg"],
+            "queue_stats": qs["stats"],
             "queued_by_platform": queued_by_platform,
             "accounts": accounts.list_accounts(),
             "creators": rows, "posts": show, "daily": daily,

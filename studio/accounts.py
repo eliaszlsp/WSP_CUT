@@ -55,9 +55,17 @@ PLATFORM_PREF_DEFAULTS = {
         "allow_long": False,
     },
 }
+QUEUE_DEFAULTS = {
+    "short_period_cap": 2,
+    "short_daily_cap": 0,
+    "short_gap_min": 0,
+    "long_daily_cap": 2,
+    "long_gap_min": 240,
+    "strict_floor": True,
+}
 SETTING_DEFAULTS = {"discord_webhook": "", "telegram_token": "", "telegram_chat": "", "paused": False,
-                    "paused_platforms": [], "platform_prefs": {}, "digest_hour": 8, "last_digest": "", "tour_done": False,
-                    "cover_enabled": False, "cover_first_frame": True}
+                    "paused_platforms": [], "platform_prefs": {}, "queue_cfg": {}, "digest_hour": 8,
+                    "last_digest": "", "tour_done": False, "cover_enabled": False, "cover_first_frame": True}
 
 YT_SCOPES = "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly"
 IG = "https://graph.instagram.com"
@@ -340,6 +348,34 @@ def _clean_platform_prefs(cur: dict, patch: dict) -> dict:
     return out
 
 
+def _clean_queue_cfg(cur: dict, patch) -> dict:
+    """Validate unified queue speed & weekend scheduling limits."""
+    out = {**QUEUE_DEFAULTS, **(cur if isinstance(cur, dict) else {})}
+    if not isinstance(patch, dict):
+        return out
+    if "short_period_cap" in patch and patch["short_period_cap"] is not None:
+        out["short_period_cap"] = max(0, min(24, int(float(patch["short_period_cap"]))))
+    if "short_daily_cap" in patch and patch["short_daily_cap"] is not None:
+        out["short_daily_cap"] = max(0, min(100, int(float(patch["short_daily_cap"]))))
+    if "short_gap_min" in patch and patch["short_gap_min"] is not None:
+        g = int(float(patch["short_gap_min"]))
+        out["short_gap_min"] = 0 if g <= 0 else max(10, min(720, g))
+        if g > 0:
+            out["strict_floor"] = False
+    if "long_daily_cap" in patch and patch["long_daily_cap"] is not None:
+        out["long_daily_cap"] = max(0, min(30, int(float(patch["long_daily_cap"]))))
+    if "long_gap_min" in patch and patch["long_gap_min"] is not None:
+        out["long_gap_min"] = max(30, min(1440, int(float(patch["long_gap_min"]))))
+    if "strict_floor" in patch:
+        out["strict_floor"] = bool(patch["strict_floor"])
+    return out
+
+
+def queue_cfg() -> dict:
+    """Return active unified queue pacing rules merged with defaults."""
+    return {**QUEUE_DEFAULTS, **(settings().get("queue_cfg") or {})}
+
+
 def settings() -> dict:
     u = ctx.uid()
     if u not in _settings_mem:
@@ -361,6 +397,8 @@ def save_settings(patch: dict) -> dict:
                 v = [p for p in PLATFORM_NAMES if p in chosen]
             elif k == "platform_prefs":
                 v = _clean_platform_prefs(s.get("platform_prefs") or {}, v)
+            elif k == "queue_cfg":
+                v = _clean_queue_cfg(s.get("queue_cfg") or {}, v)
             elif k == "digest_hour":
                 v = max(0, min(23, int(v)))
             else:

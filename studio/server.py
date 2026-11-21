@@ -1363,11 +1363,61 @@ def put_settings(body: dict = Body(...)):
         accounts.save_settings(body)
     except (ValueError, TypeError) as e:
         raise HTTPException(400, str(e))
-    if isinstance(body.get("platform_prefs"), dict):
+    if isinstance(body.get("queue_cfg"), dict):
+        posting.rebalance_all()
+    elif isinstance(body.get("platform_prefs"), dict):
         for plat in body["platform_prefs"]:
             if plat in accounts.PLATFORM_NAMES:
                 posting.rebalance_platform(plat)
+    ctx.bump()
     return accounts.public_settings()
+
+
+@app.get("/api/queue")
+def get_queue():
+    return posting.queue_summary()
+
+
+@app.put("/api/queue/config")
+def put_queue_config(body: dict = Body(...)):
+    b = body if isinstance(body, dict) else {}
+    preset = str(b.get("preset") or "").strip().lower()
+    if preset == "weekend":
+        cfg_patch = {"short_period_cap": 4, "short_daily_cap": 10, "short_gap_min": 55,
+                     "long_daily_cap": 4, "long_gap_min": 150, "strict_floor": False}
+    elif preset == "turbo":
+        cfg_patch = {"short_period_cap": 6, "short_daily_cap": 14, "short_gap_min": 35,
+                     "long_daily_cap": 6, "long_gap_min": 90, "strict_floor": False}
+    elif preset == "normal":
+        cfg_patch = dict(accounts.QUEUE_DEFAULTS)
+    else:
+        cfg_patch = {k: b[k] for k in accounts.QUEUE_DEFAULTS if k in b}
+    try:
+        patch: dict = {"queue_cfg": cfg_patch}
+        if isinstance(b.get("platform_prefs"), dict):
+            patch["platform_prefs"] = b["platform_prefs"]
+        accounts.save_settings(patch)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(400, str(e))
+    posting.rebalance_all()
+    ctx.bump()
+    return posting.queue_summary()
+
+
+@app.post("/api/queue/boost")
+def post_queue_boost(body: dict = Body(...)):
+    b = body if isinstance(body, dict) else {}
+    try:
+        res = posting.boost_today(
+            longs=max(0, min(20, int(b.get("longs", 0) or 0))),
+            shorts=max(0, min(30, int(b.get("shorts", 0) or 0))),
+            reels=max(0, min(30, int(b.get("reels", 0) or 0))),
+            tiktoks=max(0, min(30, int(b.get("tiktoks", 0) or 0))),
+            sync_reels=bool(b.get("sync_reels", True)),
+        )
+    except (ValueError, TypeError) as e:
+        raise HTTPException(400, str(e))
+    return {**posting.queue_summary(), "boost": res}
 
 
 @app.get("/api/accounts")

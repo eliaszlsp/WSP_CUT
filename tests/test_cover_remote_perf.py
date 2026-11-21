@@ -173,6 +173,60 @@ check("web/index.html includes mobile bottom dock & responsive touch CSS", ".mob
 check("web/index.html includes Cover UI functions", all(k in html for k in ("renderCoverCard", "/cover/upload", "/cover/generate", "cover_mode")))
 check("web/index.html includes Remote QR modal & API hook", "openRemoteDlg" in html and "/api/remote" in html)
 check("web/index.html includes DOM anti-lag guards", "content-visibility" in html and "S.jobsLimit" in html)
+check("web/index.html includes Queue Control UI hooks", all(k in html for k in ("openQueueCtrlDlg", "/api/queue/config", "/api/queue/boost", "qpreset")))
+
+import re as _re  # noqa: E402
+scripts = _re.findall(r"<script[^>]*>(.*?)</script>", html, _re.DOTALL)
+js_tmp = Path(os.environ["PEAKCUT_DATA"]) / "ui_check.js"
+js_tmp.write_text("\n".join(scripts), encoding="utf-8")
+node_res = subprocess.run(["node", "--check", str(js_tmp)], capture_output=True, text=True)
+check("web/index.html inline JS passes node --check", node_res.returncode, 0)
+
+# ------------------------------------------------------------------ 5. Unified Queue Control + Today Booster
+q_get = c.get("/api/queue")
+check("GET /api/queue returns stats and queue_cfg", q_get.status_code == 200 and "stats" in q_get.json() and "queue_cfg" in q_get.json())
+
+q_put = c.put("/api/queue/config", json={"preset": "weekend"}, headers=ORIGIN)
+check("PUT /api/queue/config weekend preset updates caps",
+      (q_put.status_code, q_put.json()["queue_cfg"]["short_daily_cap"], q_put.json()["queue_cfg"]["long_daily_cap"]),
+      (200, 10, 4))
+
+# Populate fake future posts across YT Long, YT Short, and IG Reels, then test boost_today
+import time as _t  # noqa: E402
+from studio import jobs as _jobs  # noqa: E402
+with ctx.as_user(UID):
+    posting._posts.clear()
+    _fake_j = {"id": "qj1", "user": UID, "creator": cid, "dir": str(Path(os.environ["PEAKCUT_DATA"]) / "qj1"),
+               "status": "done", "created": _t.time(), "clips": []}
+    Path(_fake_j["dir"], "clips").mkdir(parents=True, exist_ok=True)
+    tmr = _t.time() + 86400
+    for idx in range(6):
+        s_id = f"qs{idx}"
+        l_id = f"ql{idx}"
+        _fake_j["clips"].append({"id": s_id, "format": "9:16", "start": 0.0, "end": 35.0, "status": "done", "title": f"S{idx}"})
+        posting._posts.append({"id": f"py{idx}", "user": UID, "job": "qj1", "clip": s_id, "creator": cid, "account": "yt1",
+                               "account_name": "YT", "platform": "youtube", "status": "scheduled", "due_at": tmr + idx * 3600, "priority": 3, "format": "9:16"})
+        posting._posts.append({"id": f"pi{idx}", "user": UID, "job": "qj1", "clip": s_id, "creator": cid, "account": "ig1",
+                               "account_name": "IG", "platform": "instagram", "status": "scheduled", "due_at": tmr + idx * 3600, "priority": 3, "format": "9:16"})
+        if idx < 3:
+            _fake_j["clips"].append({"id": l_id, "format": "16:9", "clip_kind": "long", "start": 0.0, "end": 700.0, "status": "done", "title": f"L{idx}"})
+            posting._posts.append({"id": f"pl{idx}", "user": UID, "job": "qj1", "clip": l_id, "creator": cid, "account": "yt1",
+                                   "account_name": "YT", "platform": "youtube", "status": "scheduled", "due_at": tmr + idx * 3600, "priority": 1, "format": "16:9"})
+    _jobs.save(_fake_j)
+
+    fake_midday = _t.mktime((*_t.localtime()[:3], 14, 0, 0, 0, 0, -1))
+    with patch.object(posting.time, "time", return_value=fake_midday):
+        b_res = posting.boost_today(longs=2, shorts=4, sync_reels=True)
+        today_str = posting._day(fake_midday)
+        yt_s_td = [p for p in posting._posts if p["platform"] == "youtube" and p["format"] == "9:16" and posting._day(p["due_at"]) == today_str]
+        yt_l_td = [p for p in posting._posts if p["platform"] == "youtube" and p["format"] == "16:9" and posting._day(p["due_at"]) == today_str]
+        ig_td = [p for p in posting._posts if p["platform"] == "instagram" and posting._day(p["due_at"]) == today_str]
+        check("boost_today schedules +2 long, +4 shorts, and syncs 4 reels into today",
+              (b_res["longs_today_scheduled"], b_res["shorts_today_scheduled"], len(yt_l_td), len(yt_s_td), len(ig_td)),
+              (2, 4, 2, 4, 4))
+        check("boost_today syncs IG Reels timestamps to matching YT Shorts",
+              sorted(round(p["due_at"]) for p in ig_td) == sorted(round(p["due_at"]) for p in yt_s_td))
+    posting._posts.clear()
 
 ascii_js = (ROOT / "web" / "gradient-ascii.js").read_text(encoding="utf-8")
 check("web/gradient-ascii.js caps FPS and DPR to save GPU", "fps = 24" in ascii_js and "minStep = 1000 / (s.fps || 24)" in ascii_js and "1.25" in ascii_js)
